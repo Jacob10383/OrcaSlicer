@@ -1935,6 +1935,33 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         return;
     }
 
+    // Check for staggered perimeters conflicts when relevant settings change
+    if (m_type == Preset::TYPE_PRINT && 
+        (opt_key == "staggered_perimeters" ||
+         opt_key == "initial_layer_print_height" || opt_key == "layer_height" ||
+         opt_key == "top_surface_line_width" || opt_key == "outer_wall_line_width" ||
+         opt_key == "wall_generator" || opt_key == "spiral_mode")) {
+        DynamicPrintConfig* config = m_config;
+        bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
+        if (config->opt_bool("staggered_perimeters") &&
+            (abs(config->opt_float("initial_layer_print_height") - config->opt_float("layer_height")) > EPSILON ||
+            !(config->option<ConfigOptionFloatOrPercent>("top_surface_line_width") == config->option<ConfigOptionFloatOrPercent>("outer_wall_line_width")) ||
+                !have_arachne ||
+                config->opt_bool("spiral_mode"))) {
+            DynamicPrintConfig new_conf = *config;
+            auto answer = m_config_manipulation.show_staggered_perimeter_settings_dialog();
+            if (answer == wxID_YES) {
+                new_conf.set_key_value("initial_layer_print_height", config->option<ConfigOptionFloat>("layer_height")->clone());
+                new_conf.set_key_value("top_surface_line_width", config->option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->clone());
+                new_conf.set_key_value("wall_generator", new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
+                new_conf.set_key_value("spiral_mode", new ConfigOptionBool(false));
+            } else {
+                new_conf.set_key_value("staggered_perimeters", new ConfigOptionBool(false));
+            }
+            m_config_manipulation.apply(config, &new_conf);
+        }
+    }
+
     update();
     if(m_active_page)
         m_active_page->update_visibility(m_mode, true);
