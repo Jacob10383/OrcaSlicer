@@ -11,6 +11,8 @@
 #include "Plater.hpp"
 
 #include <wx/msgdlg.h>
+#include <algorithm>
+#include <array>
 
 namespace Slic3r {
 namespace GUI {
@@ -19,6 +21,7 @@ void ConfigManipulation::apply(DynamicPrintConfig* config, DynamicPrintConfig* n
 {
     bool modified = false;
     m_applying_keys = config->diff(*new_config);
+    m_last_applied_keys = m_applying_keys;
     for (auto opt_key : m_applying_keys) {
         config->set_key_value(opt_key, new_config->option(opt_key)->clone());
         modified = true;
@@ -338,8 +341,42 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         is_msg_dlg_already_exist = false;
     }
 
-    // Staggered perimeters validation is now handled in Tab::on_value_change()
-    // to only trigger when relevant settings are changed by the user
+    bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
+    static const std::array<std::string, 7> staggered_related_keys = {
+        "staggered_perimeters",
+        "initial_layer_print_height",
+        "layer_height",
+        "top_surface_line_width",
+        "outer_wall_line_width",
+        "wall_generator",
+        "spiral_mode"
+    };
+
+    if (!is_plate_config &&
+        config->opt_bool("staggered_perimeters") &&
+        std::any_of(m_last_applied_keys.begin(), m_last_applied_keys.end(), [](auto& key) {
+            return std::find(staggered_related_keys.begin(), staggered_related_keys.end(), key) != staggered_related_keys.end();
+        }) &&
+        (abs(config->opt_float("initial_layer_print_height") - config->opt_float("layer_height")) > EPSILON  ||
+        !(config->option<ConfigOptionFloatOrPercent>("top_surface_line_width") == config->option<ConfigOptionFloatOrPercent>("outer_wall_line_width")) ||
+            !have_arachne ||
+            config->opt_bool("spiral_mode")))
+    {
+        DynamicPrintConfig new_conf = *config;
+        auto answer = show_staggered_perimeter_settings_dialog();
+        bool support = true;
+        if (answer == wxID_YES) {
+            new_conf.set_key_value("initial_layer_print_height", config->option<ConfigOptionFloat>("layer_height")->clone());
+            new_conf.set_key_value("top_surface_line_width", config->option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->clone() );
+            new_conf.set_key_value("wall_generator", new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
+            new_conf.set_key_value("spiral_mode", new ConfigOptionBool(false));
+        }
+        else {
+            new_conf.set_key_value("staggered_perimeters", new ConfigOptionBool(false));
+        }
+        apply(config, &new_conf);
+        is_msg_dlg_already_exist = false;
+    }
 
     if (config->opt_bool("alternate_extra_wall") &&
         (config->opt_enum<EnsureVerticalShellThickness>("ensure_vertical_shell_thickness") == evstAll)) {

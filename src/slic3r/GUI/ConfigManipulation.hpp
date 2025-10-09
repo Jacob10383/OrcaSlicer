@@ -37,6 +37,7 @@ class ConfigManipulation
     wxWindow*    m_msg_dlg_parent {nullptr};
 
     t_config_option_keys m_applying_keys;
+    t_config_option_keys m_last_applied_keys;
 
 public:
     ConfigManipulation(std::function<void()> load_config,
@@ -64,6 +65,7 @@ public:
     bool    is_applying() const;
 
     void    apply(DynamicPrintConfig* config, DynamicPrintConfig* new_config);
+    const t_config_option_keys& last_applied_keys() const { return m_last_applied_keys; }
     t_config_option_keys const &applying_keys() const;
     void    toggle_field(const std::string& field_key, const bool toggle, int opt_index = -1);
     void    toggle_line(const std::string& field_key, const bool toggle, int opt_index = -1);
