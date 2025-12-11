@@ -3218,13 +3218,16 @@ void Sidebar::sync_external_filaments()
         if (auto nm = wxGetApp().plater()->get_notification_manager())
             nm->push_notification(NotificationType::CustomNotification, level, text);
     };
+    auto show_error_dialog = [this](const std::string& title, const std::string& detail) {
+        MessageDialog dlg(this, from_u8(detail), from_u8(title), wxICON_WARNING | wxOK);
+        dlg.ShowModal();
+    };
 
     const std::string base = build_moonraker_base(cfg);
     if (base.empty()) {
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Moonraker base URL empty (print_host missing)";
-        MessageDialog dlg(this, _L("Cannot sync filaments: printer host is not configured."), _L("Sync filaments"), wxICON_WARNING | wxOK);
-        dlg.ShowModal();
-        notify(NotificationManager::NotificationLevel::WarningNotificationLevel, _u8L("Filament sync failed: printer host not configured."));
+        show_error_dialog(_u8L("Sync filaments"),
+                          _u8L("Cannot sync filaments: printer host is not configured."));
         return;
     }
 
@@ -3253,16 +3256,17 @@ void Sidebar::sync_external_filaments()
 
     if (!slots_error.empty() || slots_status >= 400 || slots_body.empty()) {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " slot fetch failed status=" << slots_status << " err=" << slots_error;
-        MessageDialog dlg(this, _L("Failed to sync filaments (slot lookup). See log for details."), _L("Sync filaments"), wxICON_WARNING | wxOK);
-        dlg.ShowModal();
-        notify(NotificationManager::NotificationLevel::WarningNotificationLevel, _u8L("Filament sync failed: slot lookup error."));
+        std::string detail = (boost::format(_u8L("Slot lookup failed.\nURL: %1%\nStatus: %2%\nError: %3%"))
+                              % slots_url % slots_status % (slots_error.empty() ? "-" : slots_error)).str();
+        show_error_dialog(_u8L("Sync filaments"), detail);
         return;
     }
 
     json slots_json = json::parse(slots_body, nullptr, false, true);
     if (slots_json.is_discarded()) {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " slot response JSON parse failed";
-        notify(NotificationManager::NotificationLevel::WarningNotificationLevel, _u8L("Filament sync failed: slot response invalid JSON."));
+        show_error_dialog(_u8L("Sync filaments"),
+                          _u8L("Slot lookup failed: invalid JSON in response."));
         return;
     }
 
@@ -3310,16 +3314,17 @@ void Sidebar::sync_external_filaments()
 
     if (!spool_error.empty() || spool_status >= 400 || spool_body.empty()) {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " spool fetch failed status=" << spool_status << " err=" << spool_error;
-        MessageDialog dlg(this, _L("Failed to sync filaments (spool lookup). See log for details."), _L("Sync filaments"), wxICON_WARNING | wxOK);
-        dlg.ShowModal();
-        notify(NotificationManager::NotificationLevel::WarningNotificationLevel, _u8L("Filament sync failed: spool lookup error."));
+        std::string detail = (boost::format(_u8L("Spool lookup failed.\nURL: %1%/server/spoolman/proxy\nStatus: %2%\nError: %3%"))
+                              % base % spool_status % (spool_error.empty() ? "-" : spool_error)).str();
+        show_error_dialog(_u8L("Sync filaments"), detail);
         return;
     }
 
     json spool_json = json::parse(spool_body, nullptr, false, true);
     if (spool_json.is_discarded()) {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " spool response JSON parse failed";
-        notify(NotificationManager::NotificationLevel::WarningNotificationLevel, _u8L("Filament sync failed: spool response invalid JSON."));
+        show_error_dialog(_u8L("Sync filaments"),
+                          _u8L("Spool lookup failed: invalid JSON in response."));
         return;
     }
 
