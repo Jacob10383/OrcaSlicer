@@ -3338,13 +3338,9 @@ void Sidebar::sync_external_filaments()
             const auto& f = obj["filament"];
             if (f.contains("extra") && f["extra"].contains("profile"))
                 entry.profile = f["extra"]["profile"].get<std::string>();
-            if (entry.profile.empty() && f.contains("name"))
-                entry.profile = f["name"].get<std::string>();
             if (f.contains("color_hex"))
                 entry.color_hex = f["color_hex"].get<std::string>();
         }
-        if (entry.profile.empty() && obj.contains("name"))
-            entry.profile = obj["name"].get<std::string>();
         spool_map[id] = entry;
     };
 
@@ -3396,10 +3392,14 @@ void Sidebar::sync_external_filaments()
         }
 
         const auto& entry = sit->second;
+        if (entry.profile.empty()) {
+            failures.push_back((boost::format("Slot %1%: spool missing profile name") % (i + 1)).str());
+            continue;
+        }
         const std::string preset_name = match_profile(entry.profile);
         if (preset_name.empty()) {
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " no confident preset match for profile '" << entry.profile << "' slot " << i;
-            failures.push_back((boost::format("Slot %1%: no preset match for '%2%'") % (i + 1) % entry.profile).str());
+            failures.push_back((boost::format("Slot %1%: no preset match for profile '%2%'") % (i + 1) % entry.profile).str());
             continue;
         }
 
