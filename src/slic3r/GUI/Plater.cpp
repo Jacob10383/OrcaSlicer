@@ -3222,14 +3222,14 @@ void Sidebar::sync_external_filaments()
         return;
     }
 
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Moonraker base: " << base;
+    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Moonraker base: " << base;
 
     // Fetch slot assignments
     std::string slots_body;
     std::string slots_error;
     unsigned    slots_status = 0;
     const std::string slots_url = base + "/server/database/item?namespace=fluidd&key=filamentBox.slots";
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Fetching slots from " << slots_url;
+    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Fetching slots from " << slots_url;
 
     Http::get(slots_url)
         .timeout_connect(5)
@@ -3282,7 +3282,7 @@ void Sidebar::sync_external_filaments()
     unsigned    spool_status = 0;
     json spool_request = {{"request_method", "GET"}, {"path", "/v1/spool"}, {"use_v2_response", true}};
 
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Fetching spools list from " << base << "/server/spoolman/proxy";
+    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Fetching spools list from " << base << "/server/spoolman/proxy";
     Http::post(base + "/server/spoolman/proxy")
         .timeout_connect(5)
         .timeout_max(10)
@@ -3404,7 +3404,7 @@ void Sidebar::sync_external_filaments()
     }
 
     bundle.export_selections(*wxGetApp().app_config);
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " applied " << applied << " filament mappings";
+    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " applied " << applied << " filament mappings";
 }
 
 void Sidebar::on_bed_type_change(BedType bed_type)
