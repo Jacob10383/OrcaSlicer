@@ -189,6 +189,7 @@ public:
     // BBS
     void on_bed_type_change(BedType bed_type);
     void load_ams_list(MachineObject* obj);
+    void sync_external_filaments();
     std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list(bool is_from_big_sync_btn = false);
     bool sync_extruder_list();

@@ -19,6 +19,7 @@
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <nlohmann/json.hpp>
 
 #include <wx/sizer.h>
 #include <wx/stattext.h>
@@ -37,6 +38,7 @@
 #include <wx/busyinfo.h>
 #include <wx/event.h>
 #include <wx/wrapsizer.h>
+#include "../Utils/Http.hpp"
 #ifdef _WIN32
 #include <wx/richtooltip.h>
 #include <wx/custombgwin.h>
@@ -195,6 +197,58 @@ wxDEFINE_EVENT(EVT_SEND_FINISHED,                   wxCommandEvent);
 wxDEFINE_EVENT(EVT_PUBLISH_FINISHED,                wxCommandEvent);
 //BBS: repair model
 wxDEFINE_EVENT(EVT_REPAIR_MODEL,                    wxCommandEvent);
+
+namespace {
+std::string trim_and_lower(std::string s)
+{
+    boost::algorithm::trim(s);
+    boost::algorithm::to_lower(s);
+    return s;
+}
+
+std::string normalize_profile_name(const std::string& name)
+{
+    std::string n = name;
+    boost::algorithm::trim(n);
+    if (!n.empty() && n.front() == '\"' && n.back() == '\"' && n.size() > 1)
+        n = n.substr(1, n.size() - 2);
+    return trim_and_lower(n);
+}
+
+std::string strip_protocol_and_path(const std::string& host)
+{
+    std::string out = host;
+    auto proto_pos = out.find("://");
+    if (proto_pos != std::string::npos)
+        out = out.substr(proto_pos + 3);
+    auto path_pos = out.find('/');
+    if (path_pos != std::string::npos)
+        out = out.substr(0, path_pos);
+    return out;
+}
+
+std::string build_moonraker_base(const DynamicPrintConfig& cfg)
+{
+    std::string host = cfg.opt_string("print_host");
+    if (host.empty())
+        host = cfg.opt_string("print_host_webui");
+
+    if (host.empty())
+        return {};
+
+    host = strip_protocol_and_path(host);
+
+    auto colon_pos = host.rfind(':');
+    if (colon_pos != std::string::npos && colon_pos > 0) {
+        host = host.substr(0, colon_pos);
+    }
+
+    if (host.empty())
+        return {};
+
+    return "http://" + host + ":7125";
+}
+} // namespace
 wxDEFINE_EVENT(EVT_FILAMENT_COLOR_CHANGED,          wxCommandEvent);
 wxDEFINE_EVENT(EVT_INSTALL_PLUGIN_NETWORKING,       wxCommandEvent);
 wxDEFINE_EVENT(EVT_UPDATE_PLUGINS_WHEN_LAUNCH,       wxCommandEvent);
@@ -459,6 +513,7 @@ struct Sidebar::priv
     wxStaticText* m_staticText_filament_settings;
     ScalableButton *  m_bpButton_add_filament;
     ScalableButton *  m_bpButton_del_filament;
+    ScalableButton *  m_bpButton_sync_filament;
     ScalableButton *  m_bpButton_ams_filament;
     ScalableButton *  m_bpButton_set_filament;
     int m_menu_filament_id = -1;
@@ -2065,6 +2120,16 @@ Sidebar::Sidebar(Plater *parent)
         //bSizer39->Hide(p->m_bpButton_del_filament); // ORCA: Hide delete filament button if there is only one filament
     }
 
+    // Placeholder sync button for external filament slots (non-AMS)
+    ScalableButton* sync_btn = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "ams_fila_sync", wxEmptyString, wxDefaultSize, wxDefaultPosition,
+        wxBU_EXACTFIT | wxNO_BORDER, false, 16);
+    sync_btn->SetToolTip(_L("Sync external filament slots"));
+    sync_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        sync_external_filaments();
+    });
+    p->m_bpButton_sync_filament = sync_btn;
+    bSizer39->Add(sync_btn, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
+
     ams_btn = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "ams_fila_sync", wxEmptyString, wxDefaultSize, wxDefaultPosition,
                                                  wxBU_EXACTFIT | wxNO_BORDER, false, 16); // ORCA match icon size with other icons as 16x16
     ams_btn->SetToolTip(_L("Synchronize filament list from AMS"));
@@ -2782,6 +2847,7 @@ void Sidebar::msw_rescale()
     p->m_filament_icon->msw_rescale();
     p->m_bpButton_add_filament->msw_rescale();
     p->m_bpButton_del_filament->msw_rescale();
+    p->m_bpButton_sync_filament->msw_rescale();
     p->m_bpButton_ams_filament->msw_rescale();
     p->m_bpButton_set_filament->msw_rescale();
     p->m_flushing_volume_btn->Rescale();
@@ -2864,6 +2930,7 @@ void Sidebar::sys_color_changed()
     p->m_filament_icon->msw_rescale();
     p->m_bpButton_add_filament->msw_rescale();
     p->m_bpButton_del_filament->msw_rescale();
+    p->m_bpButton_sync_filament->msw_rescale();
     p->m_bpButton_ams_filament->msw_rescale();
     p->m_bpButton_set_filament->msw_rescale();
     p->m_flushing_volume_btn->Rescale();
@@ -3139,6 +3206,205 @@ bool Sidebar::is_new_project_in_gcode3mf()
         return true;
     }
     return false;
+}
+
+void Sidebar::sync_external_filaments()
+{
+    wxBusyCursor busy;
+    auto& bundle = *wxGetApp().preset_bundle;
+    const DynamicPrintConfig cfg = bundle.printers.get_selected_preset().config;
+
+    const std::string base = build_moonraker_base(cfg);
+    if (base.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Moonraker base URL empty (print_host missing)";
+        MessageDialog dlg(this, _L("Cannot sync filaments: printer host is not configured."), _L("Sync filaments"), wxICON_WARNING | wxOK);
+        dlg.ShowModal();
+        return;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Moonraker base: " << base;
+
+    // Fetch slot assignments
+    std::string slots_body;
+    std::string slots_error;
+    unsigned    slots_status = 0;
+    const std::string slots_url = base + "/server/database/item?namespace=fluidd&key=filamentBox.slots";
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Fetching slots from " << slots_url;
+
+    Http::get(slots_url)
+        .timeout_connect(5)
+        .timeout_max(10)
+        .on_complete([&](std::string body, unsigned status) {
+            slots_body  = std::move(body);
+            slots_status = status;
+        })
+        .on_error([&](std::string body, std::string err, unsigned status) {
+            slots_body   = std::move(body);
+            slots_error  = std::move(err);
+            slots_status = status;
+        })
+        .perform_sync();
+
+    if (!slots_error.empty() || slots_status >= 400 || slots_body.empty()) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " slot fetch failed status=" << slots_status << " err=" << slots_error;
+        MessageDialog dlg(this, _L("Failed to sync filaments (slot lookup). See log for details."), _L("Sync filaments"), wxICON_WARNING | wxOK);
+        dlg.ShowModal();
+        return;
+    }
+
+    json slots_json = json::parse(slots_body, nullptr, false, true);
+    if (slots_json.is_discarded()) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " slot response JSON parse failed";
+        return;
+    }
+
+    std::vector<int> slot_ids;
+    try {
+        json value = slots_json.contains("result") ? slots_json["result"]["value"] : slots_json["value"];
+        if (value.is_array()) {
+            for (const auto& v : value) {
+                if (v.is_number_integer())
+                    slot_ids.push_back(v.get<int>());
+            }
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " slot parse exception: " << e.what();
+    }
+
+    if (slot_ids.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " no slot IDs found in Moonraker response";
+        return;
+    }
+
+    // Fetch spool data
+    std::string spool_body;
+    std::string spool_error;
+    unsigned    spool_status = 0;
+    json spool_request = {{"request_method", "GET"}, {"path", "/v1/spool"}, {"use_v2_response", true}};
+
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Fetching spools list from " << base << "/server/spoolman/proxy";
+    Http::post(base + "/server/spoolman/proxy")
+        .timeout_connect(5)
+        .timeout_max(10)
+        .header("Content-Type", "application/json")
+        .set_post_body(spool_request.dump())
+        .on_complete([&](std::string body, unsigned status) {
+            spool_body  = std::move(body);
+            spool_status = status;
+        })
+        .on_error([&](std::string body, std::string err, unsigned status) {
+            spool_body   = std::move(body);
+            spool_error  = std::move(err);
+            spool_status = status;
+        })
+        .perform_sync();
+
+    if (!spool_error.empty() || spool_status >= 400 || spool_body.empty()) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " spool fetch failed status=" << spool_status << " err=" << spool_error;
+        MessageDialog dlg(this, _L("Failed to sync filaments (spool lookup). See log for details."), _L("Sync filaments"), wxICON_WARNING | wxOK);
+        dlg.ShowModal();
+        return;
+    }
+
+    json spool_json = json::parse(spool_body, nullptr, false, true);
+    if (spool_json.is_discarded()) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " spool response JSON parse failed";
+        return;
+    }
+
+    struct SpoolEntry {
+        std::string profile;
+        std::string color_hex;
+    };
+    std::map<int, SpoolEntry> spool_map;
+
+    auto ingest_spool = [&spool_map](const json& obj) {
+        if (!obj.is_object() || !obj.contains("id"))
+            return;
+        int id = obj["id"].get<int>();
+        SpoolEntry entry;
+        if (obj.contains("filament")) {
+            const auto& f = obj["filament"];
+            if (f.contains("extra") && f["extra"].contains("profile"))
+                entry.profile = f["extra"]["profile"].get<std::string>();
+            if (entry.profile.empty() && f.contains("name"))
+                entry.profile = f["name"].get<std::string>();
+            if (f.contains("color_hex"))
+                entry.color_hex = f["color_hex"].get<std::string>();
+        }
+        if (entry.profile.empty() && obj.contains("name"))
+            entry.profile = obj["name"].get<std::string>();
+        spool_map[id] = entry;
+    };
+
+    try {
+        json response = spool_json.contains("result") ? spool_json["result"]["response"] : spool_json["response"];
+        if (response.is_array()) {
+            for (const auto& item : response) ingest_spool(item);
+        } else if (response.is_object()) {
+            if (response.contains("spools") && response["spools"].is_array()) {
+                for (const auto& item : response["spools"]) ingest_spool(item);
+            } else {
+                ingest_spool(response);
+            }
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " spool parse exception: " << e.what();
+    }
+
+    if (spool_map.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " spool list empty after parsing";
+        return;
+    }
+
+    // Map slots to presets/colors
+    const auto slot_count = std::min(slot_ids.size(), p->combos_filament.size());
+    bundle.filament_presets.resize(p->combos_filament.size(), bundle.filaments.get_selected_preset_name());
+
+    auto match_profile = [&](const std::string& profile) -> std::string {
+        const std::string target = normalize_profile_name(profile);
+        if (target.empty())
+            return {};
+        for (const auto& preset : bundle.filaments) {
+            if (normalize_profile_name(preset.name) == target)
+                return preset.name;
+        }
+        return {};
+    };
+
+    size_t applied = 0;
+    for (size_t i = 0; i < slot_count; ++i) {
+        const int spool_id = slot_ids[i];
+        auto sit = spool_map.find(spool_id);
+        if (sit == spool_map.end()) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " no spool for slot index " << i << " spool_id=" << spool_id;
+            continue;
+        }
+
+        const auto& entry = sit->second;
+        const std::string preset_name = match_profile(entry.profile);
+        if (preset_name.empty()) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " no confident preset match for profile '" << entry.profile << "' slot " << i;
+            continue;
+        }
+
+        bundle.filament_presets[i] = preset_name;
+        p->combos_filament[i]->SetValue(from_u8(preset_name));
+        p->combos_filament[i]->update();
+
+        if (!entry.color_hex.empty()) {
+            std::string color = entry.color_hex;
+            boost::algorithm::trim(color);
+            if (!color.empty() && color.front() != '#')
+                color = "#" + color;
+            std::vector<std::string> colors{color};
+            p->combos_filament[i]->sync_colour_config(colors, false);
+        }
+        ++applied;
+    }
+
+    bundle.export_selections(*wxGetApp().app_config);
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " applied " << applied << " filament mappings";
 }
 
 void Sidebar::on_bed_type_change(BedType bed_type)
