@@ -44,18 +44,19 @@ public:
     bool fetch_filament_info(std::string dev_id) override;
 
     // Parse the boxsInfo JSON returned by CrealityPrint::query_boxes_info() into
-    // a flat list of loaded slots, plus the count of CFS boxes the printer reports.
+    // a flat list of loaded slots, the physical CFS count, and external-holder presence.
     static bool parse_cfs_response(const std::string&    response,
                                    std::vector<CFSSlot>& slots,
                                    int&                  box_count,
+                                   bool&                 external_present,
                                    std::string&          error);
 
     // Strip PLA/PETG/... subtype suffixes ("PLA Silk", "PLA+", "ABS Pro") to base
     // type so the preset_bundle->filaments.filament_id_by_type() lookup succeeds.
     static std::string normalize_filament_type(const std::string& filament_type);
 
-    // Score visible compatible filament presets against the CFS spool metadata and
-    // return the best-matching filament_id. See implementation for scoring details.
+    // Resolve CFS metadata to an exact preset name, preferring user presets on
+    // scored ties. Generic fallback retains the upstream filament ID.
     static std::string match_filament_preset(const PresetCollection& filaments,
                                              const std::string&      vendor,
                                              const std::string&      brand_name,

@@ -1,0 +1,95 @@
+name: Sync upstream branches
+
+on:
+  schedule:
+    - cron: '17 11 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  sync:
+    name: Sync ${{ matrix.target_branch }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sync-upstreams-${{ matrix.target_branch }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_branch: main
+            upstream_url: https://github.com/OrcaSlicer/OrcaSlicer.git
+            upstream_branch: main
+          - target_branch: NanashiBase
+            upstream_url: https://github.com/NanashiTheNameless/OrcaSlicer.git
+            upstream_branch: main
+
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.target_branch }}
+          fetch-depth: 0
+
+      - name: Merge upstream and dispatch build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add source-upstream "${{ matrix.upstream_url }}"
+          git fetch source-upstream "${{ matrix.upstream_branch }}"
+
+          before="$(git rev-parse HEAD)"
+          if ! git merge --no-ff --no-commit "source-upstream/${{ matrix.upstream_branch }}"; then
+            conflicted="$(git diff --name-only --diff-filter=U)"
+            non_workflow_conflicts="$(printf '%s\n' "$conflicted" | grep -v '^\.github/workflows/' || true)"
+            if [[ -n "$non_workflow_conflicts" ]]; then
+              git merge --abort || true
+              echo "Upstream merge has non-workflow conflicts; leaving ${{ matrix.target_branch }} unchanged."
+              printf '%s\n' "$non_workflow_conflicts"
+              exit 1
+            fi
+
+            echo "Restoring ${{ matrix.target_branch }} workflow files after workflow-only conflicts."
+          fi
+
+          # Workflows are owned by this fork. Replace the whole directory so
+          # files newly added upstream cannot leak into the push.
+          git rm -r -f --ignore-unmatch .github/workflows
+          git restore --source="$before" --staged --worktree -- .github/workflows
+
+          if ! git diff --quiet "$before" -- .github/workflows; then
+            git merge --abort || true
+            echo "Failed to restore ${{ matrix.target_branch }} workflow files exactly."
+            exit 1
+          fi
+
+          if git diff --cached --quiet; then
+            merge_head="$(git rev-parse --git-path MERGE_HEAD)"
+            if [[ -f "$merge_head" ]]; then
+              git merge --abort
+            fi
+            echo "${{ matrix.target_branch }} already up to date after preserving workflow files."
+            exit 0
+          fi
+
+          git commit --no-edit
+          after="$(git rev-parse HEAD)"
+
+          if [[ "$before" == "$after" ]]; then
+            echo "${{ matrix.target_branch }} already up to date."
+            exit 0
+          fi
+
+          git push origin "HEAD:${{ matrix.target_branch }}"
+          gh workflow run build_all.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "${{ matrix.target_branch }}"

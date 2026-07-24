@@ -30,19 +30,18 @@ bool has_visible_base_preset(const PresetCollection& filaments, const std::strin
 } // namespace
 
 // Score visible compatible filament presets against the CFS spool metadata and
-// return the best-matching filament_id. Scoring:
+// return the exact name of the best-matching preset. An exact case-insensitive
+// CFS name is authoritative and matched before type scoring so a bridge can
+// preserve an explicitly configured profile. Otherwise scoring is:
 //   +20  preset name contains brand_name as a substring
 //        (e.g. "Hyper PLA" in "Hyper PLA @Creality K2 0.4 nozzle")
 //   +10  preset name contains the vendor substring (e.g. "Creality")
-//   Tiebreak: prefer the SYSTEM (shipped) preset over user copies. Brand-
-//   specific system presets carry their own filament_id; user copies of
-//   generic presets inherit a generic filament_id from their parent, so
-//   preferring the user copy can collapse a brand-specific match back to
-//   "Generic PLA" via the inherited id. Plus: this code targets upstream
-//   OrcaSlicer where shipping the user's local tuning would be wrong.
+//   Tiebreak: prefer the USER preset over shipped system presets.
 // Requires the preset's declared filament_type to equal the spool's base type
-// (PLA/PETG/ABS/...) so we never auto-pick a PETG preset for a PLA spool.
-// Falls back to filaments.filament_id_by_type(base_type) when nothing scores.
+// (PLA/PETG/ABS/...) for heuristic matches so we never auto-pick a PETG preset
+// for a PLA spool. Falls back to filaments.filament_id_by_type(base_type) when
+// nothing scores; the downstream resolver retains its legacy ID lookup for that
+// generic fallback and for agents that still supply filament IDs.
 std::string CrealityPrintAgent::match_filament_preset(const PresetCollection& filaments,
                                                       const std::string&      vendor,
                                                       const std::string&      brand_name,
@@ -74,14 +73,21 @@ std::string CrealityPrintAgent::match_filament_preset(const PresetCollection& fi
         // exactly the presets users care about most.
         ++considered;
 
+        const std::string name_lower = to_lower(p.name);
+        if (!brand_lower.empty() && brand_lower != type_lower && name_lower == brand_lower) {
+            BOOST_LOG_TRIVIAL(info)
+                << "CrealityPrintAgent: exact CFS preset name \"" << brand_name
+                << "\" -> \"" << p.name << "\"";
+            return p.name;
+        }
+
         std::string preset_type;
         if (const auto* ft = p.config.option<ConfigOptionStrings>("filament_type"))
             if (!ft->values.empty()) preset_type = ft->values.front();
         if (to_lower(preset_type) != type_lower) continue;
 
-        const std::string name_lower = to_lower(p.name);
         int score = 0;
-        if (!brand_lower.empty() && name_lower.find(brand_lower) != std::string::npos)
+        if (!brand_lower.empty() && brand_lower != type_lower && name_lower.find(brand_lower) != std::string::npos)
             score += 20;
         if (!vendor_lower.empty() && name_lower.find(vendor_lower) != std::string::npos)
             score += 10;
@@ -104,7 +110,7 @@ std::string CrealityPrintAgent::match_filament_preset(const PresetCollection& fi
     std::sort(matches.begin(), matches.end(),
               [](const Match& a, const Match& b) {
                   if (a.score   != b.score)   return a.score > b.score;
-                  if (a.is_user != b.is_user) return !a.is_user; // prefer system over user
+                  if (a.is_user != b.is_user) return a.is_user; // prefer user over system
                   return false;
               });
 
@@ -114,7 +120,7 @@ std::string CrealityPrintAgent::match_filament_preset(const PresetCollection& fi
         << "\" (score=" << matches.front().score
         << ", " << matches.size() << " candidate(s) of " << considered << " considered)";
 
-    return matches.front().preset->filament_id;
+    return matches.front().preset->name;
 }
 
 CrealityPrintAgent::CrealityPrintAgent(std::string log_dir)
@@ -147,6 +153,7 @@ std::string CrealityPrintAgent::normalize_filament_type(const std::string& filam
 // Schema (verified 2026-05-06 against K2 Combo F021 firmware v1.1.260206):
 //   { "boxsInfo": { "materialBoxs": [
 //     { "id": int, "state": int, "type": int,    // type 0 = CFS, 1 = single-spool external
+//       "external": bool,                           // optional bridge compatibility marker
 //       "materials": [
 //         { "id": int, "state": int,             // state 1 = loaded
 //           "vendor": str, "type": str, "name": str,
@@ -156,12 +163,14 @@ std::string CrealityPrintAgent::normalize_filament_type(const std::string& filam
 bool CrealityPrintAgent::parse_cfs_response(const std::string&    response,
                                             std::vector<CFSSlot>& slots,
                                             int&                  box_count,
+                                            bool&                 external_present,
                                             std::string&          error)
 {
     using nlohmann::json;
 
     slots.clear();
     box_count = 0;
+    external_present = false;
 
     if (response.empty()) {
         error = "empty response";
@@ -181,17 +190,19 @@ bool CrealityPrintAgent::parse_cfs_response(const std::string&    response,
         return false;
     }
 
-    // Sequential AMS-style index for accepted CFS boxes. The K2's raw box.id has
-    // gaps (id 0 is the external spool holder, type=1, skipped) — using the raw id
-    // would publish phantom slots for the gap. Renumber accepted boxes 0,1,2,...
+    // Renumber physical CFS boxes sequentially; raw ids reserve 0 for external.
     int cfs_count = 0;
+    CFSSlot external_slot;
+    bool external_loaded = false;
     for (const auto& box : resp["boxsInfo"]["materialBoxs"]) {
         const int box_st   = box.value("state", 0);
         const int box_type = box.value("type",  0);
-        if (box_st != 1)   continue; // inactive boxes
-        if (box_type != 0) continue; // non-CFS (external spool holder, handled separately by upload dialog)
+        const bool is_external = box_type == 1 || box.value("external", false);
+        if (box_st != 1) continue;
+        if (box_type != 0 && !is_external) continue;
 
-        const int cfs_index = cfs_count++;
+        external_present |= is_external;
+        const int cfs_index = is_external ? -1 : cfs_count++;
 
         if (!box.contains("materials") || !box["materials"].is_array())
             continue;
@@ -225,11 +236,21 @@ bool CrealityPrintAgent::parse_cfs_response(const std::string&    response,
             if (s.color_hex.size() == 8 && s.color_hex[0] == '#')
                 s.color_hex = "#" + s.color_hex.substr(2);
 
+            if (is_external) {
+                external_slot = std::move(s);
+                external_loaded = true;
+                break;
+            }
             slots.push_back(std::move(s));
         }
     }
 
     box_count = cfs_count;
+    if (external_loaded) {
+        external_slot.box_id = cfs_count;
+        external_slot.slot_id = 0;
+        slots.push_back(std::move(external_slot));
+    }
     return true;
 }
 
@@ -268,15 +289,16 @@ bool CrealityPrintAgent::fetch_filament_info(std::string dev_id)
 
     std::vector<CFSSlot> slots;
     int                  box_count = 0;
+    bool                 external_present = false;
     std::string          parse_err;
-    if (!parse_cfs_response(response, slots, box_count, parse_err)) {
+    if (!parse_cfs_response(response, slots, box_count, external_present, parse_err)) {
         BOOST_LOG_TRIVIAL(warning)
             << "CrealityPrintAgent: CFS query failed (" << parse_err << "), "
             << "falling back to base agent";
         return MoonrakerPrinterAgent::fetch_filament_info(std::move(dev_id));
     }
 
-    if (box_count == 0) {
+    if (box_count == 0 && !external_present) {
         // No active CFS boxes attached — printer is in direct-spool mode. Let the
         // base agent take over so the user still gets whatever filament info
         // Moonraker exposes.
@@ -287,47 +309,48 @@ bool CrealityPrintAgent::fetch_filament_info(std::string dev_id)
 
     BOOST_LOG_TRIVIAL(info)
         << "CrealityPrintAgent: " << box_count << " CFS box(es), "
+        << (external_present ? "external holder, " : "")
         << slots.size() << " loaded slot(s)";
 
-    // Index loaded slots by (box, slot) for O(1) lookup as we walk the full
-    // box_count * 4 grid, emitting an AmsTrayData entry for each physical slot.
+    // Index loaded slots by (box, slot), with external appended after the CFS grid.
     std::map<std::pair<int, int>, const CFSSlot*> by_position;
     for (const auto& s : slots)
         by_position[{s.box_id, s.slot_id}] = &s;
 
     auto* bundle = GUI::wxGetApp().preset_bundle;
 
-    const int max_slots = box_count * 4;
+    const int total_slots = box_count * 4 + (external_present ? 1 : 0);
+    const int ams_count = box_count + (external_present ? 1 : 0);
     std::vector<AmsTrayData> trays;
-    trays.reserve(max_slots);
+    trays.reserve(total_slots);
 
-    for (int box = 0; box < box_count; ++box) {
-        for (int idx = 0; idx < 4; ++idx) {
-            AmsTrayData tray;
-            tray.slot_index = box * 4 + idx;
+    for (int slot_index = 0; slot_index < total_slots; ++slot_index) {
+        const int box = slot_index / 4;
+        const int idx = slot_index % 4;
+        AmsTrayData tray;
+        tray.slot_index = slot_index;
 
-            auto it = by_position.find({box, idx});
-            if (it == by_position.end()) {
-                tray.has_filament = false;
-                trays.push_back(std::move(tray));
-                continue;
-            }
-
-            const CFSSlot& s = *it->second;
-            tray.has_filament = true;
-            tray.tray_type    = normalize_filament_type(s.filament_type);
-            tray.tray_color   = s.color_hex;
-
-            if (bundle) {
-                tray.tray_info_idx = match_filament_preset(
-                    bundle->filaments, s.vendor, s.brand_name, tray.tray_type);
-            }
-
+        auto it = by_position.find({box, idx});
+        if (it == by_position.end()) {
+            tray.has_filament = false;
             trays.push_back(std::move(tray));
+            continue;
         }
+
+        const CFSSlot& s = *it->second;
+        tray.has_filament = true;
+        tray.tray_type    = normalize_filament_type(s.filament_type);
+        tray.tray_color   = s.color_hex;
+
+        if (bundle) {
+            tray.tray_info_idx = match_filament_preset(
+                bundle->filaments, s.vendor, s.brand_name, tray.tray_type);
+        }
+
+        trays.push_back(std::move(tray));
     }
 
-    build_ams_payload(box_count, max_slots - 1, trays);
+    build_ams_payload(ams_count, total_slots - 1, trays);
     return true;
 }
 
