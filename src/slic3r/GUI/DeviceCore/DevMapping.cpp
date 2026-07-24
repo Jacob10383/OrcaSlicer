@@ -2,9 +2,11 @@
 #include "DevMapping.h"
 #include "DevFilaSystem.h"
 #include "DevUtil.h"
+#include "libslic3r/PresetBundle.hpp"
 
 // TODO: remove this include
 #include "slic3r/GUI/DeviceManager.hpp"
+#include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/GuiColor.hpp"
 
@@ -77,6 +79,13 @@ namespace Slic3r
         result.color = tray.color;
         result.type = tray.get_filament_type();
         result.filament_id = tray.setting_id;
+        // CFS sync may carry an exact preset name; mapping tie-breaks use its filament family ID.
+        if (auto* bundle = wxTheApp ? GUI::wxGetApp().preset_bundle : nullptr) {
+            if (const Preset* preset = bundle->filaments.find_preset(tray.setting_id, false);
+                preset && preset->is_visible && preset->is_compatible) {
+                result.filament_id = preset->filament_id;
+            }
+        }
         result.ctype = tray.ctype;
         result.colors = tray.cols;
 
