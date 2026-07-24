@@ -18,6 +18,11 @@ on:
           type: boolean
           default: false
 
+permissions:
+  contents: write
+  actions: write
+  checks: write
+
 jobs:
   build_orca:
     name: Build OrcaSlicer
@@ -32,12 +37,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
           lfs: 'false'
 
       - name: Detect Ubuntu version
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !contains(inputs.os, 'arm')
         run: |
           ubuntu_version=$(lsb_release -rs | tr -d '.')
           case "$ubuntu_version" in
@@ -58,22 +63,11 @@ jobs:
 
       - name: load cached deps
         if: ${{ !(runner.os == 'macOS' && inputs.macos-combine-only) }}
-        id: load_cached_deps
-        uses: actions/cache@v6
+        uses: actions/cache@v5
         with:
           path: ${{ inputs.cache-path }}
           key: ${{ inputs.cache-key }}
-
-        # The deps cache is built (and confirmed present) by the upstream Build
-        # Deps job, but under repo cache-storage quota pressure it can be evicted
-        # by a concurrent matrix leg's cache save before this job gets to restore
-        # it. Rebuild deps in place here rather than hard-failing on that race.
-      - name: Rebuild deps (cache restore missed)
-        if: ${{ !(runner.os == 'macOS' && inputs.macos-combine-only) && steps.load_cached_deps.outputs.cache-hit != 'true' }}
-        uses: ./.github/actions/build-deps
-        with:
-          arch: ${{ inputs.arch }}
-          self-hosted: ${{ vars.SELF_HOSTED }}
+          fail-on-cache-miss: true
 
       - uses: lukka/get-cmake@latest
         # The windows-11-arm runner needs CMake <= 3.31 (handled in the next step).
@@ -148,16 +142,15 @@ jobs:
 
 #   Mac
       - name: Install tools mac
-        if: runner.os == 'macOS' && !inputs.macos-combine-only
+        if: runner.os == 'macOS'
         run: |
           if [ -z "${{ vars.SELF_HOSTED }}" ]; then
-            # Runner image ships an untrusted aws/tap we never use; brew warns on
-            # every invocation until it is gone (see https://docs.brew.sh/Tap-Trust).
-            brew untap aws/tap || true
-            brew install libtool
+            brew install autoconf automake texinfo libtool
             brew list
           fi
-          mkdir -p ${{ github.workspace }}/deps/build/${{ inputs.arch }}
+          if [ "${{ inputs.macos-combine-only }}" != "true" ]; then
+            mkdir -p ${{ github.workspace }}/deps/build/${{ inputs.arch }}
+          fi
 
       - name: Free disk space
         if: runner.os == 'macOS' && !inputs.macos-combine-only && !vars.SELF_HOSTED
@@ -170,26 +163,8 @@ jobs:
       - name: Build slicer mac
         if: runner.os == 'macOS' && !inputs.macos-combine-only
         working-directory: ${{ github.workspace }}
-        # arm64 only: build the tests here; the unit_tests_macos job runs them.
-        env:
-          ORCA_TESTS_BUILD_ONLY: ${{ inputs.arch == 'arm64' && '1' || '' }}
         run: |
-          ./build_release_macos.sh -s -n -x ${{ !vars.SELF_HOSTED && '-1' || '' }} -a ${{ inputs.arch }} -t 10.15 ${{ inputs.arch == 'arm64' && '-T' || '' }}
-
-      - name: Pack unit tests mac
-        if: runner.os == 'macOS' && !inputs.macos-combine-only && inputs.arch == 'arm64'
-        working-directory: ${{ github.workspace }}
-        run: tar -cvf build_tests.tar build/arm64/tests
-
-      - name: Upload Test Artifact mac
-        if: runner.os == 'macOS' && !inputs.macos-combine-only && inputs.arch == 'arm64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ github.sha }}-tests-macos-arm64
-          overwrite: true
-          path: build_tests.tar
-          retention-days: 5
-          if-no-files-found: error
+          ./build_release_macos.sh -s -n -x ${{ !vars.SELF_HOSTED && '-1' || '' }} -a ${{ inputs.arch }} -t 10.15
 
       - name: Pack macOS app bundle ${{ inputs.arch }}
         if: runner.os == 'macOS' && !inputs.macos-combine-only
@@ -228,10 +203,7 @@ jobs:
           ./build_release_macos.sh -u -x ${{ !vars.SELF_HOSTED && '-1' || '' }} -a universal -t 10.15
 
       - name: Create DMG without notary
-        # Upstream skips this on main/belt-printer because its "Sign app and notary" step
-        # (Apple notarization, needs org secrets) builds the DMG there instead. This fork
-        # has no notarization step, so it must always build the DMG itself.
-        if: (github.repository != 'OrcaSlicer/OrcaSlicer' || (github.ref != 'refs/heads/main' && github.ref != 'refs/heads/belt-printer')) && runner.os == 'macOS' && inputs.macos-combine-only
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/belt-printer' && runner.os == 'macOS' && inputs.macos-combine-only
         working-directory: ${{ github.workspace }}
         run: |
           # Load the `retry` helper (retries flaky commands such as `hdiutil create`).
@@ -277,24 +249,24 @@ jobs:
           if-no-files-found: ignore
 
       - name: Deploy Mac release
-        if: runner.os == 'macOS' && inputs.macos-combine-only && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer'
+        if: runner.os == 'macOS' && inputs.macos-combine-only && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer'
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ${{ github.workspace }}/OrcaSlicer_Mac_universal_${{ env.ver }}.dmg
           asset_name: OrcaSlicer_Mac_universal_nightly.dmg
           asset_content_type: application/octet-stream
           max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
 
       - name: Deploy Mac OrcaSlicer_profile_validator DMG release
-        if: runner.os == 'macOS' && inputs.macos-combine-only && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer'
+        if: runner.os == 'macOS' && inputs.macos-combine-only && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer'
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ${{ github.workspace }}/OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
           asset_name: OrcaSlicer_profile_validator_Mac_universal_nightly.dmg
           asset_content_type: application/octet-stream
@@ -330,27 +302,10 @@ jobs:
         # env:
         #   WindowsSdkDir: 'C:\Program Files (x86)\Windows Kits\10\'
         #   WindowsSDKVersion: '10.0.26100.0\'
-        # "tests" builds the unit tests too; the unit_tests_windows_* jobs run them.
         run: |
           $arch = "${{ inputs.arch }}"
-          if ($arch -eq "arm64") { .\build_release_vs.bat slicer arm64 tests } else { .\build_release_vs.bat slicer tests }
+          if ($arch -eq "arm64") { .\build_release_vs.bat slicer arm64 } else { .\build_release_vs.bat slicer }
         shell: pwsh
-
-      - name: Pack unit tests Win
-        if: runner.os == 'Windows'
-        working-directory: ${{ github.workspace }}
-        shell: pwsh
-        run: tar -cvf build_tests.tar ${{ env.BUILD_DIR }}/tests
-
-      - name: Upload Test Artifact Win
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ github.sha }}-tests-windows-${{ inputs.arch }}
-          overwrite: true
-          path: build_tests.tar
-          retention-days: 5
-          if-no-files-found: error
 
       # NSIS is x86-only; it runs (and the installer it emits runs) under ARM64's
       # x86 emulation, packaging the native arm64 payload from build-arm64.
@@ -401,60 +356,60 @@ jobs:
           path: ${{ github.workspace }}/build/src/Release/OrcaSlicer_profile_validator.exe
 
       - name: Deploy Windows release portable (x64)
-        if: runner.os == 'Windows' && inputs.arch == 'x64' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer'
+        if: runner.os == 'Windows' && inputs.arch == 'x64' && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer'
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer_Windows_${{ env.ver }}${{ env.ARCH_SUFFIX }}_portable.zip
           asset_name: OrcaSlicer_Windows_portable_nightly.zip
           asset_content_type: application/x-zip-compressed
           max_releases: 1
 
       - name: Deploy Windows release portable (arm64)
-        if: runner.os == 'Windows' && inputs.arch == 'arm64' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer'
+        if: runner.os == 'Windows' && inputs.arch == 'arm64' && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer'
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer_Windows_${{ env.ver }}_arm64_portable.zip
           asset_name: OrcaSlicer_Windows_portable_nightly_arm64.zip
           asset_content_type: application/x-zip-compressed
           max_releases: 1
 
       - name: Deploy Windows release installer (x64)
-        if: runner.os == 'Windows' && inputs.arch == 'x64' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer'
+        if: runner.os == 'Windows' && inputs.arch == 'x64' && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer'
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer_Windows_Installer_${{ env.ver }}${{ env.ARCH_SUFFIX }}.exe
           asset_name: OrcaSlicer_Windows_Installer_nightly.exe
           asset_content_type: application/x-msdownload
           max_releases: 1
 
       - name: Deploy Windows release installer (arm64)
-        if: runner.os == 'Windows' && inputs.arch == 'arm64' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer'
+        if: runner.os == 'Windows' && inputs.arch == 'arm64' && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer'
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer_Windows_Installer_${{ env.ver }}${{ env.ARCH_SUFFIX }}.exe
           asset_name: OrcaSlicer_Windows_Installer_nightly_arm64.exe
           asset_content_type: application/x-msdownload
           max_releases: 1
 
       - name: Deploy Windows OrcaSlicer_profile_validator release (x64 only)
-        if: runner.os == 'Windows' && inputs.arch == 'x64' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer'
+        if: runner.os == 'Windows' && inputs.arch == 'x64' && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer'
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ${{ github.workspace }}/build/src/Release/OrcaSlicer_profile_validator.exe
           asset_name: OrcaSlicer_profile_validator_Windows_nightly.exe
           asset_content_type: application/x-msdownload
@@ -490,54 +445,29 @@ jobs:
       - name: Build slicer and tests
         if: runner.os == 'Linux'
         shell: bash
-        env:
-          # Ubuntu 22.04's default clang 14 mis-codegens some numeric code (observed
-          # as multicolor prints purging 35-45% less filament than the identical
-          # source built with the clang 18 that 24.04 ships). Pin clang 18 there
-          # instead; deps stay on the cached build since the C++ ABI is stable
-          # across these clang versions.
-          ORCA_CLANG_VERSION: ${{ env.ubuntu-ver == '2204' && '18' || '' }}
         run: |
           # Build + tar the unit tests (-t) only on the leg that runs them: the
-          # 24.04 aarch64 leg by default (faster GitHub arm runner), or amd64 when
-          # using self-hosted runners (no arm self-hosted server).
-          #
-          # This fork's linux matrix runs two ubuntu versions per arch (22.04 +
-          # 24.04, amd64 and aarch64 alike). Ensure exactly one leg per arch (the
-          # 24.04 one) produces the test artifact, so the separate unit_tests job
-          # has a single unambiguous artifact to download and execute.
-          tests=${{ (!vars.SELF_HOSTED && inputs.arch == 'aarch64' && env.ubuntu-ver == '2404') || (vars.SELF_HOSTED && inputs.arch != 'aarch64') || (!vars.SELF_HOSTED && (inputs.arch == '' || inputs.arch == null) && env.ubuntu-ver == '2404') }}
+          # aarch64 leg by default (faster GitHub arm runner), or amd64 when using
+          # self-hosted runners (no arm self-hosted server). unit_tests downloads
+          # this tarball. The profile validator is built with -s, so amd64 keeps it.
+          tests=${{ (!vars.SELF_HOSTED && inputs.arch == 'aarch64') || (vars.SELF_HOSTED && inputs.arch != 'aarch64') }}
           if $tests; then flags=-istrlL; else flags=-isrlL; fi
           ./build_linux.sh "$flags"
           ./scripts/check_appimage_libs.sh ./build/package ./build/package/bin/orca-slicer
           appimage=./build/OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch_suffix }}_${{ env.ver }}.AppImage
           mv -n ./build/OrcaSlicer_Linux_V${{ env.ver_pure }}.AppImage "$appimage"
           chmod +x "$appimage"
-          if $tests; then tar -cvf build_tests.tar build/tests; fi
+          if $tests; then tar -cvpf build_tests.tar build/tests; fi
 
         # Use tar because upload-artifacts won't always preserve directory structure
         # and doesn't preserve file permissions
       - name: Upload Test Artifact
-        if: runner.os == 'Linux' && ((!vars.SELF_HOSTED && inputs.arch == 'aarch64' && env.ubuntu-ver == '2404') || (vars.SELF_HOSTED && inputs.arch != 'aarch64') || (!vars.SELF_HOSTED && (inputs.arch == '' || inputs.arch == null) && env.ubuntu-ver == '2404'))
+        if: runner.os == 'Linux' && ((!vars.SELF_HOSTED && inputs.arch == 'aarch64') || (vars.SELF_HOSTED && inputs.arch != 'aarch64'))
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.sha }}-tests-linux-${{ inputs.arch == 'aarch64' && 'aarch64' || 'x86_64' }}
+          name: ${{ github.sha }}-tests
           overwrite: true
           path: build_tests.tar
-          retention-days: 5
-          if-no-files-found: error
-
-        # Ship the freshly-built validator so slice_check_linux (build_all.yml)
-        # can slice-sweep the shipped profiles with this PR's engine. Taken from
-        # the aarch64 leg so the sweep also exercises the arm build; x86_64 on
-        # SELF_HOSTED, which skips arm64.
-      - name: Upload profile validator (for slice check)
-        if: ${{ runner.os == 'Linux' && (vars.SELF_HOSTED && inputs.arch != 'aarch64' || !vars.SELF_HOSTED && inputs.arch == 'aarch64') }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ github.sha }}-profile-validator-linux-${{ inputs.arch == 'aarch64' && 'aarch64' || 'x86_64' }}
-          overwrite: true
-          path: ./build/src/Release/OrcaSlicer_profile_validator
           retention-days: 5
           if-no-files-found: error
 
@@ -552,7 +482,7 @@ jobs:
           python3 "$test_repo_dir/run_test.py" "${{ github.workspace }}/build/package/bin/orca-slicer"
 
       - name: Build orca_custom_preset_tests
-        if: github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64'
+        if: github.ref == 'refs/heads/NanashiBase' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64'
         working-directory: ${{ github.workspace }}/build/src/Release
         shell: bash
         run: |
@@ -575,58 +505,73 @@ jobs:
           path: './build/src/Release/OrcaSlicer_profile_validator'
 
       - name: Deploy Ubuntu release (amd64)
-        if: ${{ (inputs.arch == '' || inputs.arch == null) && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer' }}
+        if: ${{ (inputs.arch == '' || inputs.arch == null) && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer' }}
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ./build/OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
           asset_name: OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_nightly.AppImage
           asset_content_type: application/octet-stream
           max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
       - name: Deploy Ubuntu release (aarch64)
-        if: ${{ inputs.arch == 'aarch64' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer' }}
+        if: ${{ inputs.arch == 'aarch64' && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer' }}
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ./build/OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_aarch64_${{ env.ver }}.AppImage
           asset_name: OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_nightly_aarch64.AppImage
           asset_content_type: application/octet-stream
           max_releases: 1
+      - name: Deploy Ubuntu release tag
+        if: ${{ (inputs.arch == '' || inputs.arch == null) && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer' }}
+        uses: NanashiTheNameless/action-create-tag@main
+        with:
+          tag: "Nightly-Nanashi"
+          tag_exists_error: false
+          force_push_tag: true
+          message: "Nightly-Nanashi"
+          github_token: ${{ github.token }}
+
+      - name: Keep Nightly-Rolling first
+        if: ${{ (inputs.arch == '' || inputs.arch == null) && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer' }}
+        shell: bash
+        run: |
+          for _ in 1 2 3; do
+            git fetch --force origin refs/tags/Nightly-Rolling:refs/tags/Nightly-Rolling
+            rolling_ref=$(git rev-parse refs/tags/Nightly-Rolling)
+            rolling_target=$(git rev-parse 'refs/tags/Nightly-Rolling^{}')
+            git -c 'user.name=github-actions[bot]' -c 'user.email=41898282+github-actions[bot]@users.noreply.github.com' \
+              tag --force --annotate Nightly-Rolling "$rolling_target" --message Nightly-Rolling
+            if git push --force-with-lease=refs/tags/Nightly-Rolling:"$rolling_ref" origin refs/tags/Nightly-Rolling; then
+              exit 0
+            fi
+          done
+          exit 1
 
       - name: Deploy Ubuntu OrcaSlicer_profile_validator release (amd64 only)
-        if: ${{ (inputs.arch == '' || inputs.arch == null) && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer' }}
+        if: ${{ (inputs.arch == '' || inputs.arch == null) && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer' }}
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ./build/src/Release/OrcaSlicer_profile_validator
           asset_name: OrcaSlicer_profile_validator_Linux${{ env.ubuntu-ver-str }}
           asset_content_type: application/octet-stream
           max_releases: 1
 
       - name: Deploy orca_custom_preset_tests
-        if: ${{ inputs.os == 'ubuntu-24.04' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer' }}
+        if: ${{ inputs.os == 'ubuntu-24.04' && github.ref == 'refs/heads/NanashiBase' && github.repository == 'Jacob10383/OrcaSlicer' }}
         uses: NanashiTheNameless/deploy-nightly@master
         with:
-          token: ${{ secrets.GH_TOKEN }}
-          upload_url: https://uploads.github.com/repos/NanashiTheNameless/OrcaSlicer/releases/242055857/assets{?name,label}
-          release_id: 242055857
+          token: ${{ github.token }}
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377902/assets{?name,label}
+          release_id: 344377902
           asset_path: ${{ github.workspace }}/resources/profiles/orca_custom_preset_tests.zip
           asset_name: orca_custom_preset_tests.zip
           asset_content_type: application/octet-stream
           max_releases: 1
-
-      - name: Deploy Nightly-Rolling release tag
-        if: ${{ (inputs.arch == '' || inputs.arch == null) && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'NanashiTheNameless/OrcaSlicer' }}
-        uses: NanashiTheNameless/action-create-tag@main
-        with:
-          tag: "Nightly-Rolling"
-          tag_exists_error: false
-          force_push_tag: true
-          message: "Nightly-Rolling"
-          github_token: ${{ secrets.GH_TOKEN }}

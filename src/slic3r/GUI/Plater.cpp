@@ -4205,7 +4205,12 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
         tray_config.set_key_value("filament_slot_placeholder", new ConfigOptionBools{tray.is_slot_placeholder});
         std::optional<FilamentBaseInfo> info;
         if (wxGetApp().preset_bundle) {
-            info = wxGetApp().preset_bundle->get_filament_by_filament_id(tray.setting_id);
+            std::string metadata_id = tray.setting_id;
+            if (const Preset* preset = wxGetApp().preset_bundle->filaments.find_preset(tray.setting_id, false);
+                preset && preset->is_visible && preset->is_compatible) {
+                metadata_id = preset->filament_id;
+            }
+            info = wxGetApp().preset_bundle->get_filament_by_filament_id(metadata_id);
         }
         tray_config.set_key_value("filament_is_support", new ConfigOptionBools{ info.has_value() ? info->is_support : false});
         for (int i = 0; i < tray.cols.size(); ++i) {
