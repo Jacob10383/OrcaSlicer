@@ -33,6 +33,7 @@
 
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
+#include "slic3r/Utils/NetworkAgentFactory.hpp"
 #include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/plugin/PluginConfig.hpp"
 #include "Plater.hpp"
@@ -3077,7 +3078,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("combine_brims", "others_settings_brim#combine-brims");
         optgroup->append_single_option_line("brim_ears_max_angle", "others_settings_brim#ear-max-angle");
         optgroup->append_single_option_line("brim_ears_detection_length", "others_settings_brim#ear-detection-radius");
-        optgroup->append_single_option_line("brim_ears_outer_only");
+        optgroup->append_single_option_line("brim_ears_outer_only", "others_settings_brim#brim-ears-outer-only");
 
         optgroup = page->new_optgroup(L("Special mode"), L"param_special");
         optgroup->append_single_option_line("slicing_mode", "others_settings_special_mode#slicing-mode");
@@ -4006,13 +4007,12 @@ void TabFilament::add_filament_overrides_page()
 
     const int extruder_idx = 0; // #ys_FIXME
 
-    ConfigOptionsGroupShp retraction_optgroup = page->new_optgroup(L("Retraction"), L"param_retraction");
-    auto append_retraction_option = [this, retraction_optgroup](const std::string& opt_key, int opt_index)
+    auto append_retraction_option = [this](ConfigOptionsGroupShp optgroup, const std::string& opt_key, int opt_index)
     {
         Line line {"",""};
-        line = retraction_optgroup->create_single_option_line(retraction_optgroup->get_option(opt_key, opt_index));
+        line = optgroup->create_single_option_line(optgroup->get_option(opt_key, opt_index));
 
-        line.near_label_widget = [this, optgroup_wk = ConfigOptionsGroupWkp(retraction_optgroup), opt_key, opt_index](wxWindow* parent) {
+        line.near_label_widget = [this, optgroup_wk = ConfigOptionsGroupWkp(optgroup), opt_key, opt_index](wxWindow* parent) {
             auto check_box = new ::CheckBox(parent); // ORCA modernize checkboxes
             check_box->Bind(wxEVT_TOGGLEBUTTON, [this, optgroup_wk, opt_key, opt_index](wxCommandEvent& evt) {
                 const bool is_checked = evt.IsChecked();
@@ -4039,9 +4039,10 @@ void TabFilament::add_filament_overrides_page()
             return check_box;
         };
 
-        retraction_optgroup->append_line(line);
+        optgroup->append_line(line);
     };
 
+    ConfigOptionsGroupShp retraction_optgroup = page->new_optgroup(L("Retraction"), L"param_retraction");
     for (const std::string opt_key : {  "filament_retraction_length",
                                         "filament_z_hop",
                                         "filament_z_hop_types",
@@ -4065,7 +4066,13 @@ void TabFilament::add_filament_overrides_page()
                                         //SoftFever
                                         // "filament_seam_gap"
                                      })
-        append_retraction_option(opt_key, extruder_idx);
+        append_retraction_option(retraction_optgroup, opt_key, extruder_idx);
+
+    ConfigOptionsGroupShp toolchange_optgroup = page->new_optgroup(L("Retraction when switching material"), L"param_retraction_material_change");
+    for (const std::string opt_key : {  "filament_retract_length_toolchange",
+                                        "filament_retract_restart_extra_toolchange"
+                                     })
+        append_retraction_option(toolchange_optgroup, opt_key, extruder_idx);
 
     ConfigOptionsGroupShp ironing_optgroup = page->new_optgroup(L("Ironing"), L"param_ironing");
     auto append_ironing_option = [this, ironing_optgroup](const std::string& opt_key, int opt_index)
@@ -4180,6 +4187,8 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
                                             "filament_retraction_speed",
                                             "filament_deretraction_speed",
                                             "filament_retract_restart_extra",
+                                            "filament_retract_length_toolchange",
+                                            "filament_retract_restart_extra_toolchange",
                                             "filament_retraction_minimum_travel",
                                             "filament_retract_when_changing_layer",
                                             "filament_wipe",
@@ -4210,7 +4219,8 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
         is_checked &= !dynamic_cast<ConfigOptionVectorBase*>(m_config->option(opt_key))->is_nil(extruder_idx);
         m_overrides_options[opt_key]->SetValue(is_checked);
 
-        Field* field = optgroup->get_fieldc(opt_key, 0);
+        // the toolchange overrides live in their own optgroup, so search the whole page
+        Field* field = page->get_field(opt_key, 0);
         if (field == nullptr) continue;
 
         if (opt_key == "filament_long_retractions_when_cut") {
@@ -5019,6 +5029,40 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("gcode_skip_config_block", "printer_basic_information_advanced#skip-g-code-config-block");
         optgroup->append_single_option_line("pellet_modded_printer", "printer_basic_information_advanced#pellet-modded-printer");
         optgroup->append_single_option_line("bbl_use_printhost", "printer_basic_information_advanced#use-3rd-party-print-host");
+
+        // "Printer Agent" dropdown - printer_agent is a coString; gui_type routes it to
+        // PrinterAgentChoice instead of a TextCtrl. Rows and values come from the live agent
+        // registry, and the value is stored as the agent-id string.
+        if (wxGetApp().getAgent() != nullptr)
+        {
+            auto registered_printer_agents = NetworkAgentFactory::get_registered_printer_agents();
+            if (!registered_printer_agents.empty())
+            {
+                ConfigOptionDef def;
+                def.type = coString;
+                def.gui_type = ConfigOptionDef::GUIType::printer_agent_select;
+                def.width = 3 * Field::def_width_wider() / 2;
+                def.label = L("Printer Agent");
+                def.tooltip = L("Select the network agent implementation for printer communication. "
+                    "Available agents are registered at startup.");
+                def.mode = comAdvanced;
+
+                // Create the field without get_option() so it is not registered in m_opt_map.
+                // ConfigOptionsGroup handles printer_agent before the generic mapped write path.
+                Line agent_line = optgroup->create_single_option_line(Option(def, "printer_agent"));
+                optgroup->append_line(agent_line);
+                if (Field* agent_field = get_field("printer_agent"))
+                {
+                    if (auto* choice = dynamic_cast<PrinterAgentChoice*>(agent_field); choice && choice->getWindow())
+                        choice->set_value(m_config->opt_string("printer_agent"), false);
+                }
+
+                // Register by hand so the UnsavedChanges dialog can render a row for it.
+                wxGetApp().sidebar().get_searcher().add_key("printer_agent", m_type, optgroup->title,
+                                                            optgroup->config_category());
+            }
+        }
+
         optgroup->append_single_option_line("use_3mf");
         optgroup->append_single_option_line("scan_first_layer" , "printer_basic_information_advanced#scan-first-layer");
         optgroup->append_single_option_line("enable_power_loss_recovery", "printer_basic_information_advanced#power-loss-recovery");
@@ -5885,6 +5929,16 @@ void TabPrinter::reload_config()
     // so update it implicitly
     if (m_active_page && m_active_page->title() == "Multimaterial")
         m_active_page->set_value("extruders_count", int(m_extruders_count));
+
+    // m_opt_map-driven reload does not cover printer_agent, so sync this custom field explicitly.
+    if (Field* agent_field = get_field("printer_agent"))
+    {
+        if (auto* choice = dynamic_cast<PrinterAgentChoice*>(agent_field); choice && choice->getWindow())
+        {
+            const std::string selected_agent = m_config->opt_string("printer_agent");
+            choice->set_value(selected_agent, false);
+        }
+    }
 }
 
 void TabPrinter::activate_selected_page(std::function<void()> throw_if_canceled)
@@ -5895,6 +5949,16 @@ void TabPrinter::activate_selected_page(std::function<void()> throw_if_canceled)
     // so update it implicitly
     if (m_active_page && m_active_page->title() == "Multimaterial")
         m_active_page->set_value("extruders_count", int(m_extruders_count));
+
+    // m_opt_map-driven reload does not cover printer_agent, so sync this custom field explicitly.
+    if (Field* agent_field = get_field("printer_agent"))
+    {
+        if (auto* choice = dynamic_cast<PrinterAgentChoice*>(agent_field); choice && choice->getWindow())
+        {
+            const std::string selected_agent = m_config->opt_string("printer_agent");
+            choice->set_value(selected_agent, false);
+        }
+    }
 }
 
 void TabPrinter::clear_pages()
@@ -7851,6 +7915,24 @@ bool TabPrinter::apply_extruder_cnt_from_cache()
         return true;
     }
     return false;
+}
+
+void TabPrinter::refresh_printer_agent_dropdown() const
+{
+    auto* choice = dynamic_cast<PrinterAgentChoice*>(get_field("printer_agent"));
+    if (!choice || !choice->getWindow())
+        return;
+
+    const auto agents = NetworkAgentFactory::get_registered_printer_agents();
+    if (agents.empty())
+        return;
+
+    // why: rows live on PrinterAgentChoice now; rebuild them from the live registry and re-select the stored id.
+    const std::string selected_agent = wxGetApp().preset_bundle->printers.get_edited_preset()
+                                                 .config.opt_string("printer_agent");
+    choice->reload_rows();
+    choice->set_value(selected_agent, false);
+    this->GetParent()->Layout();
 }
 
 bool Tab::validate_custom_gcodes()
