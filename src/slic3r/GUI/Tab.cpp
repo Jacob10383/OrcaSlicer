@@ -4,6 +4,7 @@
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/FilamentMixer.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -2173,18 +2174,25 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     //Orca: sync filament num if it's a multi tool printer
     if (opt_key == "extruders_count" && !m_config->opt_bool("single_extruder_multi_material")){
-        auto num_extruder = boost::any_cast<size_t>(value);
-        int         old_filament_size = wxGetApp().preset_bundle->filament_presets.size();
-        std::vector<std::string> new_colors;
-        for (int i = old_filament_size; i < num_extruder; ++i) {
-            wxColour    new_col   = Plater::get_next_color_for_filament();
-            std::string new_color = new_col.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
-            new_colors.push_back(new_color);
+        const size_t num_extruder = boost::any_cast<size_t>(value);
+        auto        *bundle       = wxGetApp().preset_bundle;
+        Sidebar     &sidebar      = wxGetApp().plater()->sidebar();
+        // A tool changer feeds filament N from nozzle N, so the extruder count sizes the physical
+        // run only; mixed slots are virtual and keep the tail. Go one slot at a time through the
+        // sidebar's own +/- calls: they insert ahead of the mixed tail and renumber filament ids,
+        // painted facets, custom g-code and mixed components, which a bulk resize clamps away.
+        // Both also refresh the print tab and export the selections, so nothing to do afterwards.
+        size_t physical = bundle->num_physical_filaments();
+        while (physical != num_extruder) {
+            if (physical < num_extruder)
+                sidebar.add_custom_filament(Plater::get_next_color_for_filament());
+            else
+                sidebar.delete_filament(physical - 1);   // physical > num_extruder >= 1
+            const size_t updated = bundle->num_physical_filaments();
+            if (updated == physical)
+                break;   // the call declined, e.g. the total slot limit - do not spin
+            physical = updated;
         }
-        wxGetApp().preset_bundle->set_num_filaments(num_extruder, new_colors);
-        wxGetApp().plater()->on_filament_count_change(num_extruder);
-        wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
-        wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
     }
 
     //Orca: disable purge_in_prime_tower if single_extruder_multi_material is disabled
@@ -2629,6 +2637,7 @@ void TabPrint::build()
         auto optgroup = page->new_optgroup(L("Layer height"), L"param_layer_height");
         optgroup->append_single_option_line("layer_height","quality_settings_layer_height");
         optgroup->append_single_option_line("initial_layer_print_height","quality_settings_layer_height");
+        optgroup->append_single_option_line("enable_mixed_color_sublayer");
 
         optgroup = page->new_optgroup(L("Line width"), L"param_line_width");
         optgroup->append_single_option_line("line_width","quality_settings_line_width");
@@ -2796,7 +2805,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("fill_multiline", "strength_settings_infill#fill-multiline");
         optgroup->append_single_option_line("sparse_infill_pattern", "strength_settings_infill#sparse-infill-pattern");
         optgroup->append_single_option_line("gyroid_optimized", "strength_settings_patterns#gyroid-optimized");
-        optgroup->append_single_option_line("sparse_infill_smooth_factor", "strength_settings_patterns#sparse-infill-smooth-factor");
+        optgroup->append_single_option_line("sparse_infill_smooth_factor", "strength_settings_infill#sparse-infill-smooth-factor");
         optgroup->append_single_option_line("infill_direction", "strength_settings_infill#direction");
         optgroup->append_single_option_line("sparse_infill_rotate_template", "strength_settings_infill_rotation_template_metalanguage");
         optgroup->append_single_option_line("skin_infill_density", "strength_settings_patterns#locked-zag");
@@ -3126,6 +3135,74 @@ void TabPrint::build()
         option.opt.full_width = true;
         option.opt.height = 25;//250;
         optgroup->append_single_option_line(option, "others_settings_notes");
+
+    // Dedicated Wave Overhangs page. Layout follows the user's mental model
+    // top-to-bottom: "do I want this?" (General) -> "which overhangs qualify?"
+    // (Detection) -> "what does the wave look like?" (Pattern) -> "extra lever
+    // for sharp corners?" (Corner reinforcement, opt-in) -> "how does it print?"
+    // (Motion + Cooling) -> "what sits on top?" (Floor layers) -> debug. The
+    // two opt-in sub-features (Corner reinforcement here, Hilbert under Floor
+    // layers) both follow a master-toggle + reveal-sub-options pattern so
+    // they're structurally consistent.
+    page = add_options_page(L("Wave overhangs"), "custom-gcode_quality");
+        optgroup = page->new_optgroup(L("General"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhangs");
+        optgroup->append_single_option_line("wave_overhangs_instead_of_bridges");
+        optgroup->append_single_option_line("support_remaining_areas_after_wave_overhangs");
+
+        optgroup = page->new_optgroup(L("Detection"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhang_min_angle");
+        optgroup->append_single_option_line("wave_overhang_min_length");
+        optgroup->append_single_option_line("wave_overhang_max_iterations");
+
+        // Pattern: how the wave is shaped.
+        optgroup = page->new_optgroup(L("Pattern"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhang_pattern");
+        optgroup->append_single_option_line("wave_overhang_seam_mode");
+        optgroup->append_single_option_line("wave_overhang_outer_perimeters");
+        optgroup->append_single_option_line("wave_overhang_line_spacing");
+        optgroup->append_single_option_line("wave_overhang_spacing_mode");
+        optgroup->append_single_option_line("wave_overhang_perimeter_overlap");
+        optgroup->append_single_option_line("wave_overhang_minimum_width");
+        optgroup->append_single_option_line("wave_overhang_min_new_area");
+        optgroup->append_single_option_line("wave_overhang_flow_mm3_per_mm");
+
+        // Corner reinforcement: opt-in feature. Master toggle reveals the
+        // three tunables (matches the pattern used by Hilbert under Floor
+        // layers). ConfigManipulation gates the sub-options on the master
+        // toggle so the sub-rows hide cleanly when off.
+        optgroup = page->new_optgroup(L("Corner reinforcement"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhang_corner_taper_enable");
+        optgroup->append_single_option_line("wave_overhang_line_spacing_corner");
+        optgroup->append_single_option_line("wave_overhang_corner_taper_distance");
+        optgroup->append_single_option_line("wave_overhang_corner_angle_threshold");
+
+        optgroup = page->new_optgroup(L("Motion"), L"param_speed");
+        optgroup->append_single_option_line("wave_overhang_print_speed");
+        optgroup->append_single_option_line("wave_overhang_perimeter_speed");
+        optgroup->append_single_option_line("wave_overhang_travel_speed");
+        optgroup->append_single_option_line("wave_overhang_end_retract_length");
+
+        optgroup = page->new_optgroup(L("Cooling"), L"param_cooling");
+        optgroup->append_single_option_line("wave_overhang_fan_speed");
+        optgroup->append_single_option_line("wave_overhang_aux_fan_speed");
+        optgroup->append_single_option_line("wave_overhang_nozzle_temp");
+        optgroup->append_single_option_line("wave_overhang_min_wave_time");
+        optgroup->append_single_option_line("wave_overhang_min_layer_time");
+
+        optgroup = page->new_optgroup(L("Floor layers"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhang_floor_layers");
+        optgroup->append_single_option_line("wave_overhang_floor_use_hilbert");
+        optgroup->append_single_option_line("wave_overhang_floor_hilbert_layers");
+        optgroup->append_single_option_line("wave_overhang_floor_hilbert_density");
+        optgroup->append_single_option_line("wave_overhang_floor_print_speed");
+        optgroup->append_single_option_line("wave_overhang_floor_perimeter_speed");
+        optgroup->append_single_option_line("wave_overhang_floor_speed_ramp");
+        optgroup->append_single_option_line("wave_overhang_floor_fan_speed");
+        optgroup->append_single_option_line("wave_overhang_floor_aux_fan_speed");
+
+        optgroup = page->new_optgroup(L("Debug"), L"param_overhang");
+        optgroup->append_single_option_line("wave_overhang_debug_gcode");
 
     // Orca: hide the dependencies tab for process for now. The UI is not ready yet.
     // page = add_options_page(L("Dependencies"), "param_profile_dependencies"); // icons ready
@@ -3503,6 +3580,21 @@ void TabPrintModel::activate_selected_page(std::function<void()> throw_if_cancel
                 f->set_value(boost::any(), false);
         }
     }
+    if (m_type == Preset::TYPE_PLATE)
+        static_cast<TabPrintPlate *>(this)->update_mixed_filament_seq_state();
+}
+
+// A mixed-color slot resolves to a different physical filament per layer, so a
+// user-defined filament print order cannot be honoured while one exists.
+void TabPrintPlate::update_mixed_filament_seq_state()
+{
+    if (!m_active_page) return;
+    auto &proj_cfg  = m_preset_bundle->project_config;
+    auto *opt       = proj_cfg.option<ConfigOptionBools>("filament_is_mixed");
+    bool  has_mixed = opt && has_any_mixed_filament(opt->values);
+
+    toggle_option("first_layer_sequence_choice", !has_mixed);
+    toggle_option("other_layers_sequence_choice", !has_mixed);
 }
 
 void TabPrintModel::on_value_change(const std::string& opt_id, const boost::any& value)
@@ -6480,7 +6572,7 @@ void Tab::load_current_preset()
                             std::string bmp_name = tab->type() == Slic3r::Preset::TYPE_FILAMENT      ? "spool" :
                                                    tab->type() == Slic3r::Preset::TYPE_SLA_MATERIAL  ? "" : "cog";
                             tab->Hide(); // #ys_WORKAROUND : Hide tab before inserting to avoid unwanted rendering of the tab
-                            dynamic_cast<Notebook*>(wxGetApp().tab_panel())->InsertPage(wxGetApp().tab_panel()->FindPage(this), tab, tab->title(), bmp_name);
+                            dynamic_cast<Notebook*>(wxGetApp().tab_panel())->InsertPage(wxGetApp().tab_panel()->FindPage(this), wxString(), tab, tab->title(), bmp_name);
                         }
                         else
 #endif
@@ -8559,8 +8651,12 @@ void Page::activate(ConfigOptionMode mode, std::function<void()> throw_if_cancel
 
 #ifdef __WXMSW__
     // BBS: fix field control position
-    wxTheApp->CallAfter([this]() {
-        for (auto group : m_optgroups) {
+    wxTheApp->CallAfter([wp = std::weak_ptr<Page>(shared_from_this())]() {
+        auto page = wp.lock();
+        if (!page)
+            return;
+
+        for (auto group : page->m_optgroups) {
             if (group->custom_ctrl)
                 group->custom_ctrl->fixup_items_positions();
         }

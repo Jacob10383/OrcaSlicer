@@ -8,7 +8,9 @@
 
 #ifdef _MSC_VER
     #define WIN32_LEAN_AND_MEAN
+    #ifndef NOMINMAX
     #define NOMINMAX
+    #endif
     #include <Windows.h>
 #endif /* _MSC_VER */
 
@@ -147,6 +149,9 @@ Semver get_version_from_json(std::string file_path)
         return Semver();
         //throw ConfigurationError(format("Failed loading configuration file \"%1%\": %2%", file_path, err.what()));
     }
+    catch(...) {
+        return Semver();
+    }
 }
 
 //BBS: add a function to load the key-values from xxx.json
@@ -261,18 +266,28 @@ void extend_default_config_length(DynamicPrintConfig& config, const bool set_nil
         }
     };
 
+    // The four variant sets are immutable after static init and probed for every
+    // key of every preset loaded; one merged map makes that a single lookup.
+    // emplace keeps the first insertion, preserving the first-set-wins priority
+    // of the else-if chain this replaces.
+    static const std::unordered_map<std::string, int> variant_class = [] {
+        std::unordered_map<std::string, int> m;
+        for (const std::string& k : print_options_with_variant)     m.emplace(k, 0);
+        for (const std::string& k : filament_options_with_variant)  m.emplace(k, 1);
+        for (const std::string& k : printer_options_with_variant_1) m.emplace(k, 2);
+        for (const std::string& k : printer_options_with_variant_2) m.emplace(k, 3);
+        return m;
+    }();
+
     for(auto& key :config.keys()){
-        if(auto iter = print_options_with_variant.find(key); iter != print_options_with_variant.end()){
-            replace_nil_and_resize(key, process_variant_length);
-        }
-        else if(auto iter = filament_options_with_variant.find(key); iter != filament_options_with_variant.end()){
-            replace_nil_and_resize(key, filament_variant_length);
-        }
-        else if(auto iter = printer_options_with_variant_1.find(key); iter != printer_options_with_variant_1.end()){
-            replace_nil_and_resize(key, machine_variant_length);
-        }
-        else if(auto iter = printer_options_with_variant_2.find(key); iter != printer_options_with_variant_2.end()){
-            replace_nil_and_resize(key, machine_variant_length * 2);
+        auto iter = variant_class.find(key);
+        if (iter == variant_class.end())
+            continue;
+        switch (iter->second) {
+        case 0: replace_nil_and_resize(key, process_variant_length); break;
+        case 1: replace_nil_and_resize(key, filament_variant_length); break;
+        case 2: replace_nil_and_resize(key, machine_variant_length); break;
+        case 3: replace_nil_and_resize(key, machine_variant_length * 2); break;
         }
     }
 }
@@ -1029,6 +1044,24 @@ static std::vector<std::string> s_Preset_print_options{
     "overhang_reverse_threshold",
     "overhang_reverse_internal_only",
     "wall_direction",
+    "wave_overhangs", "wave_overhangs_instead_of_bridges", "wave_overhang_outer_perimeters",
+    "wave_overhang_perimeter_overlap", "wave_overhang_minimum_width", "wave_overhang_pattern",
+    "support_remaining_areas_after_wave_overhangs",
+    "wave_overhang_line_spacing", "wave_overhang_flow_mm3_per_mm",
+    "wave_overhang_print_speed", "wave_overhang_perimeter_speed", "wave_overhang_travel_speed", "wave_overhang_fan_speed",
+    "wave_overhang_aux_fan_speed",
+    "wave_overhang_nozzle_temp", "wave_overhang_min_wave_time", "wave_overhang_min_layer_time",
+    "wave_overhang_floor_layers",
+    "wave_overhang_floor_use_hilbert", "wave_overhang_floor_hilbert_layers",
+    "wave_overhang_floor_hilbert_density",
+    "wave_overhang_floor_print_speed", "wave_overhang_floor_perimeter_speed", "wave_overhang_floor_fan_speed",
+    "wave_overhang_floor_aux_fan_speed", "wave_overhang_floor_speed_ramp",
+    "wave_overhang_min_angle",
+    "wave_overhang_spacing_mode", "wave_overhang_seam_mode",
+    "wave_overhang_debug_gcode", "wave_overhang_min_length",
+    "wave_overhang_max_iterations", "wave_overhang_min_new_area", "wave_overhang_end_retract_length",
+    "wave_overhang_corner_taper_enable", "wave_overhang_line_spacing_corner",
+    "wave_overhang_corner_taper_distance", "wave_overhang_corner_angle_threshold",
     "seam_position",
     "staggered_inner_seams",
     "wall_sequence",
@@ -1176,6 +1209,7 @@ static std::vector<std::string> s_Preset_print_options{
     "flush_into_infill",
     "flush_into_objects",
     "flush_into_support",
+    "enable_mixed_color_sublayer",
     "tree_support_branch_angle",
     "tree_support_angle_slow",
     "tree_support_wall_count",

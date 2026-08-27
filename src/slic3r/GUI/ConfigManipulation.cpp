@@ -603,22 +603,67 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
     }
 
     // BBS
-    static const char* keys[] = { "support_filament", "support_interface_filament"};
-    for (int i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-        std::string key = std::string(keys[i]);
+    // Reset filament overrides pointing at a slot that no longer exists. Support and the wipe
+    // tower additionally reject mixed slots: the engine consumes those keys directly, so a virtual
+    // slot would reach the G-code unresolved, while the per-feature keys are resolved per layer.
+    static const char* physical_only_keys[] = { "support_filament", "support_interface_filament", "wipe_tower_filament" };
+    static const char* feature_keys[] = { "outer_wall_filament_id", "inner_wall_filament_id",
+                                          "sparse_infill_filament_id", "internal_solid_filament_id",
+                                          "top_surface_filament_id", "bottom_surface_filament_id" };
+    auto reset_invalid_filament = [this, config, filament_cnt](const char* key, bool allow_mixed) {
         auto* opt = dynamic_cast<ConfigOptionInt*>(config->option(key, false));
-        if (opt != nullptr) {
-            if (opt->getInt() > filament_cnt) {
-                DynamicPrintConfig new_conf = *config;
-                const DynamicPrintConfig *conf_temp = wxGetApp().plater()->config();
-                int new_value = 0;
-                if (conf_temp != nullptr && conf_temp->has(key)) {
-                    new_value = conf_temp->opt_int(key);
+        if (opt == nullptr)
+            return;
+        const int  val          = opt->getInt();
+        const bool out_of_range = val > filament_cnt;
+        const bool is_mixed     = !allow_mixed && val > 0 && val <= filament_cnt &&
+                                  wxGetApp().preset_bundle->is_mixed_filament(val - 1);
+        if (!out_of_range && !is_mixed)
+            return;
+        DynamicPrintConfig new_conf = *config;
+        int new_value = 0;
+        if (out_of_range) {
+            const DynamicPrintConfig *conf_temp = wxGetApp().plater()->config();
+            if (conf_temp != nullptr && conf_temp->has(key))
+                new_value = conf_temp->opt_int(key);
+        }
+        new_conf.set_key_value(key, new ConfigOptionInt(new_value));
+        apply(config, &new_conf);
+    };
+    for (const char* key : physical_only_keys)
+        reset_invalid_filament(key, false);
+    for (const char* key : feature_keys)
+        reset_invalid_filament(key, true);
+
+    // Sub-layer splitting divides each layer by the mix ratio; an adaptive layer profile makes
+    // those sub-layer heights vary per layer, which degrades the blend. Warn once per enable.
+    {
+        static bool s_mixed_sublayer_warned = false;
+        bool sublayer_on = config->opt_bool("enable_mixed_color_sublayer");
+        if (sublayer_on && !s_mixed_sublayer_warned &&
+            wxGetApp().app_config->get("no_warn_mixed_sublayer_variable_layer") != "1") {
+            bool has_variable_layer = false;
+            for (const auto* obj : wxGetApp().model().objects) {
+                if (obj->layer_height_profile.get().size() > 4) {
+                    has_variable_layer = true;
+                    break;
                 }
-                new_conf.set_key_value(key, new ConfigOptionInt(new_value));
-                apply(config, &new_conf);
+            }
+            if (has_variable_layer) {
+                MessageDialog dialog(m_msg_dlg_parent,
+                    _L("Using variable layer height together with mixed color sublayer may result in poor color mixing quality."),
+                    "", wxICON_WARNING | wxOK);
+                dialog.show_dsa_button();
+                is_msg_dlg_already_exist = true;
+                dialog.ShowModal();
+                is_msg_dlg_already_exist = false;
+                if (dialog.get_checkbox_state())
+                    wxGetApp().app_config->set("no_warn_mixed_sublayer_variable_layer", "1");
+                s_mixed_sublayer_warned = true;
             }
         }
+        if (!sublayer_on)
+            s_mixed_sublayer_warned = false;
     }
 
     if (config->opt_enum<SeamScarfType>("seam_slope_type") != SeamScarfType::None &&
@@ -783,7 +828,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     bool has_top_shell    = has_top_shell_layers && config->option<ConfigOptionPercent>("top_surface_density")->value > 0;
     bool has_bottom_shell = config->opt_int("bottom_shell_layers") > 0;
     bool has_solid_infill = has_top_shell_layers || has_bottom_shell;
-    toggle_line("sparse_infill_smooth_factor", pattern == ipHilbertCurve);
+    toggle_line("sparse_infill_smooth_factor", is_smoothable_infill_pattern(pattern, config->opt_int("fill_multiline")));
     toggle_field("top_surface_pattern", has_top_shell);
     toggle_field("bottom_surface_pattern", has_bottom_shell);
     toggle_field("top_surface_density", has_top_shell_layers);
@@ -1162,6 +1207,67 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
 
     std::string printer_type = wxGetApp().preset_bundle->printers.get_edited_preset().get_printer_type(wxGetApp().preset_bundle);
     toggle_line("enable_wrapping_detection", DevPrinterConfigUtil::support_wrapping_detection(printer_type));
+
+
+    // Orca: wave-overhangs conditional visibility.
+    // - Master toggle off → hide every wave_overhang_* tunable (only master stays).
+    const bool wo_enabled = config->opt_bool("wave_overhangs");
+
+    for (const std::string &k : {
+        std::string("wave_overhangs_instead_of_bridges"),
+        std::string("wave_overhang_outer_perimeters"),
+        std::string("wave_overhang_flow_mm3_per_mm"),
+        std::string("wave_overhang_end_retract_length"),
+        std::string("wave_overhang_print_speed"),
+        std::string("wave_overhang_perimeter_speed"),
+        std::string("wave_overhang_travel_speed"),
+        std::string("wave_overhang_fan_speed"),
+        std::string("wave_overhang_aux_fan_speed"),
+        std::string("wave_overhang_nozzle_temp"),
+        std::string("wave_overhang_min_wave_time"),
+        std::string("wave_overhang_min_layer_time"),
+        std::string("wave_overhang_floor_layers"),
+        std::string("wave_overhang_floor_perimeter_speed"),
+        std::string("wave_overhang_floor_speed_ramp"),
+        std::string("wave_overhang_floor_use_hilbert"),
+        std::string("wave_overhang_min_angle"),
+        std::string("wave_overhang_min_length"),
+        std::string("wave_overhang_max_iterations"),
+        std::string("wave_overhang_seam_mode"),
+        std::string("wave_overhang_debug_gcode"),
+        std::string("support_remaining_areas_after_wave_overhangs"),
+        std::string("wave_overhang_pattern"),
+        std::string("wave_overhang_perimeter_overlap"),
+        std::string("wave_overhang_minimum_width"),
+        std::string("wave_overhang_line_spacing"),
+        std::string("wave_overhang_spacing_mode"),
+        std::string("wave_overhang_min_new_area"),
+        std::string("wave_overhang_corner_taper_enable"),
+    })
+        toggle_line(k, wo_enabled);
+
+    // Orca: corner-reinforcement sub-options. Master toggle reveals the three
+    // tunables, same shape as the Hilbert-floor section below.
+    const bool wo_corner_taper = wo_enabled
+        && config->opt_bool("wave_overhang_corner_taper_enable");
+    for (const std::string &k : {
+        std::string("wave_overhang_line_spacing_corner"),
+        std::string("wave_overhang_corner_taper_distance"),
+        std::string("wave_overhang_corner_angle_threshold"),
+    })
+        toggle_line(k, wo_corner_taper);
+
+    // Orca: wave-overhang Hilbert floor sub-options. Only meaningful when the
+    // master Hilbert toggle is on AND wave overhangs themselves are enabled.
+    const bool wo_floor_hilbert = wo_enabled && config->opt_bool("wave_overhang_floor_use_hilbert");
+    for (const std::string &k : {
+        std::string("wave_overhang_floor_hilbert_layers"),
+        std::string("wave_overhang_floor_hilbert_density"),
+        std::string("wave_overhang_floor_print_speed"),
+        std::string("wave_overhang_floor_fan_speed"),
+        std::string("wave_overhang_floor_aux_fan_speed"),
+    })
+        toggle_line(k, wo_floor_hilbert);
 }
 
 void ConfigManipulation::update_print_sla_config(DynamicPrintConfig* config, const bool is_global_config/* = false*/)

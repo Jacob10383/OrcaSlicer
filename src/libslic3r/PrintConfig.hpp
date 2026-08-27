@@ -101,6 +101,26 @@ enum PrintHostType {
     htPrusaLink, htPrusaConnect, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier, htMKS, htESP3D, htCrealityPrint, htObico, htFlashforge, htSimplyPrint, htElegooLink, ht3DPrinterOS, htMoonraker
 };
 
+// Orca: wave-overhang ring spacing mode.
+enum WaveOverhangSpacingMode {
+    wosmUniform,
+    wosmProgressive
+};
+
+// Orca: wave-overhang inter-ring seam direction mode.
+enum WaveOverhangSeamMode {
+    woseAlternating,
+    woseAligned,
+    woseRandom
+};
+
+// Wave-overhang fill pattern (ported from stmcculloch alpha.6).
+enum class WaveOverhangPattern : int {
+    Monotonic,
+    ZigZag,
+    Smart
+};
+
 enum AuthorizationType {
     atKeyPassword, atUserPassword
 };
@@ -141,6 +161,29 @@ inline bool is_separable_infill_pattern(InfillPattern pattern)
     case ipArchimedeanChords:
     case ipOctagramSpiral:
         return true;
+    default:
+        return false;
+    }
+}
+
+// Orca: Infill patterns that round their corners by the "sparse_infill_smooth_factor" option.
+// Grid, Triangles and Tri-hexagon only do so in their trapezoidal form, which is generated with more
+// than one line per infill wall; a single line makes them plain crossing lines with nothing to round.
+inline bool is_smoothable_infill_pattern(InfillPattern pattern, int multiline = 1)
+{
+    switch (pattern) {
+    case ipHilbertCurve:
+    case ipOctagramSpiral:
+    case ipLightning:
+    case ipHoneycomb:
+    case ip3DHoneycomb:
+    case ipConcentric:
+    case ipCrossHatch:
+        return true;
+    case ipGrid:
+    case ipTriangles:
+    case ipStars:
+        return multiline > 1;
     default:
         return false;
     }
@@ -680,6 +723,9 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WaveOverhangSpacingMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WaveOverhangSeamMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WaveOverhangPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SurfaceFillOrder)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
@@ -1334,6 +1380,45 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsNullable, filament_ironing_speed))
     // Detect bridging perimeters
     ((ConfigOptionBool, detect_overhang_wall))
+    // Wave Overhangs
+    ((ConfigOptionBool,                 wave_overhangs))
+    ((ConfigOptionBool,                 wave_overhangs_instead_of_bridges))
+    ((ConfigOptionInt,                  wave_overhang_outer_perimeters))
+    ((ConfigOptionFloat,                wave_overhang_perimeter_overlap))
+    ((ConfigOptionFloat,                wave_overhang_minimum_width))
+    ((ConfigOptionEnum<WaveOverhangPattern>, wave_overhang_pattern))
+    ((ConfigOptionFloat,                wave_overhang_line_spacing))
+    ((ConfigOptionFloat,                wave_overhang_flow_mm3_per_mm))
+    ((ConfigOptionFloat,                wave_overhang_print_speed))
+    ((ConfigOptionFloat,                wave_overhang_perimeter_speed))
+    ((ConfigOptionFloat,                wave_overhang_travel_speed))
+    ((ConfigOptionInt,                  wave_overhang_fan_speed))
+    ((ConfigOptionInt,                  wave_overhang_aux_fan_speed))
+    ((ConfigOptionInt,                       wave_overhang_floor_layers))
+    ((ConfigOptionBool,                      wave_overhang_floor_use_hilbert))
+    ((ConfigOptionInt,                       wave_overhang_floor_hilbert_layers))
+    ((ConfigOptionInt,                       wave_overhang_floor_hilbert_density))
+    ((ConfigOptionFloat,                     wave_overhang_floor_print_speed))
+    ((ConfigOptionFloat,                     wave_overhang_floor_perimeter_speed))
+    ((ConfigOptionInt,                       wave_overhang_floor_speed_ramp))
+    ((ConfigOptionInt,                       wave_overhang_floor_fan_speed))
+    ((ConfigOptionInt,                       wave_overhang_floor_aux_fan_speed))
+    ((ConfigOptionInt,                       wave_overhang_nozzle_temp))
+    ((ConfigOptionFloat,                     wave_overhang_min_wave_time))
+    ((ConfigOptionFloat,                     wave_overhang_min_layer_time))
+    ((ConfigOptionFloat,                     wave_overhang_min_angle))
+    ((ConfigOptionEnum<WaveOverhangSpacingMode>, wave_overhang_spacing_mode))
+    ((ConfigOptionEnum<WaveOverhangSeamMode>,    wave_overhang_seam_mode))
+    ((ConfigOptionBool,                      wave_overhang_debug_gcode))
+    ((ConfigOptionFloat,                     wave_overhang_min_length))
+    ((ConfigOptionInt,                       wave_overhang_max_iterations))
+    ((ConfigOptionFloat,                     wave_overhang_min_new_area))
+    ((ConfigOptionBool,                      wave_overhang_corner_taper_enable))
+    ((ConfigOptionFloat,                     wave_overhang_line_spacing_corner))
+    ((ConfigOptionFloat,                     wave_overhang_corner_taper_distance))
+    ((ConfigOptionFloat,                     wave_overhang_corner_angle_threshold))
+    ((ConfigOptionFloat,                     wave_overhang_end_retract_length))
+    ((ConfigOptionBool,                      support_remaining_areas_after_wave_overhangs))
     ((ConfigOptionInt, outer_wall_filament_id))
     ((ConfigOptionInt, inner_wall_filament_id))
     ((ConfigOptionFloatOrPercent, inner_wall_line_width))
@@ -1531,6 +1616,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             filament_colour))
     ((ConfigOptionStrings,             filament_vendor))
     ((ConfigOptionBools,               filament_is_support))
+    // Mixed-color filament: a virtual slot realized from 2-3 physical filaments.
+    ((ConfigOptionBools,               filament_is_mixed))
+    ((ConfigOptionStrings,             filament_mixed_components))
+    ((ConfigOptionStrings,             filament_mixed_sublayer_ratios))
+    ((ConfigOptionBools,               filament_mixed_gradient))
+    ((ConfigOptionStrings,             filament_mixed_gradient_range))
+    ((ConfigOptionStrings,             filament_mixed_gradient_curve))
+    ((ConfigOptionBools,               filament_mixed_gradient_per_part))
     ((ConfigOptionInts,                filament_printable))
     ((ConfigOptionInts,                filament_extruder_compatibility))
     ((ConfigOptionFloats,              filament_change_length))
@@ -1831,6 +1924,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               nozzle_temperature_range_low))
     ((ConfigOptionInts,               nozzle_temperature_range_high))
     ((ConfigOptionFloats,             wipe_distance))
+    ((ConfigOptionBool,               enable_mixed_color_sublayer))
     ((ConfigOptionBool,               enable_prime_tower))
     ((ConfigOptionBool,               prime_tower_enable_framework))
     // BBS: change wipe_tower_x and wipe_tower_y data type to floats to add partplate logic
@@ -2481,7 +2575,8 @@ namespace cereal {
             archive(serialization_key_ordinal);
             assert(serialization_key_ordinal > 0);
             auto it = Slic3r::print_config_def.by_serialization_key_ordinal.find(serialization_key_ordinal);
-            assert(it != Slic3r::print_config_def.by_serialization_key_ordinal.end());
+            if (it == Slic3r::print_config_def.by_serialization_key_ordinal.end())
+                throw std::runtime_error("VendorCache: unknown serialization_key_ordinal " + std::to_string(serialization_key_ordinal) + " - cache is stale");
             config.set_key_value(it->second->opt_key, it->second->load_option_from_archive(archive));
         }
     }
