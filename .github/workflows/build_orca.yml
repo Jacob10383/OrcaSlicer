@@ -33,8 +33,11 @@ jobs:
       ubuntu-ver: '2404'
       ubuntu-ver-str: '_Ubuntu2404'
       ORCA_UPDATER_SIG_KEY: ${{ secrets.ORCA_UPDATER_SIG_KEY }}
-      NSIS_VERSION: '3.13'
-      NSIS_SHA256: BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8
+      # Branches whose builds are published to the nightly release. The
+      # belt-printer branch ships alongside main but its assets carry a `_belt`
+      # suffix (nightly_suffix) so they never overwrite the main nightly assets.
+      deploy_nightly: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/belt-printer' }}
+      nightly_suffix: ${{ github.ref == 'refs/heads/belt-printer' && '_belt' || '' }}
 
     steps:
       - name: Checkout
@@ -46,15 +49,32 @@ jobs:
         if: ${{ !(runner.os == 'macOS' && inputs.macos-combine-only) }}
         uses: actions/cache@v6
         with:
-          path: ${{ github.workspace }}/${{ inputs.cache-path }}
+          path: ${{ inputs.cache-path }}
           key: ${{ inputs.cache-key }}
           fail-on-cache-miss: true
 
       - uses: lukka/get-cmake@latest
+        # The windows-11-arm runner needs CMake <= 3.31 (handled in the next step).
+        if: ${{ !(runner.os == 'Windows' && inputs.arch == 'arm64') }}
         with:
           cmakeVersion: "~4.3.0"  # use most recent 4.3.x version
           useLocalCache: true         # <--= Use the local cache (default is 'false').
           useCloudCache: true
+
+      - name: Install CMake 3.31.x (Windows ARM64)
+        # windows-11-arm ships CMake 4.x, which removed pre-3.5 policy
+        # compatibility AND has incomplete ASM_ARMASM linker modules
+        # (breaks Boost.Context on ARM64). Pin to the last 3.x release.
+        if: runner.os == 'Windows' && inputs.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $ver = "3.31.6"
+          $url = "https://github.com/Kitware/CMake/releases/download/v$ver/cmake-$ver-windows-arm64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\cmake.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\cmake.zip" -DestinationPath "$env:RUNNER_TEMP\cmake" -Force
+          $cmakeBin = "$env:RUNNER_TEMP\cmake\cmake-$ver-windows-arm64\bin"
+          if (-not (Test-Path "$cmakeBin\cmake.exe")) { throw "cmake.exe not found at $cmakeBin" }
+          Add-Content -Path $env:GITHUB_PATH -Value $cmakeBin
 
       # Compiler cache. Pushes save it, so main keeps it warm; pull requests
       # restore it and discard what they compiled. Objects are keyed on the
@@ -180,19 +200,10 @@ jobs:
       - name: Free disk space
         if: runner.os == 'macOS' && !inputs.macos-combine-only && !vars.SELF_HOSTED
         run: |
-          df -hI /
-          # Deleting the unused Xcodes takes minutes, so only do it when the
-          # build might not fit. A cold build uses under 4 GiB after this step.
-          avail_gib=$(df -g / | awk 'NR == 2 { print $4 }')
-          if [ "$avail_gib" -ge 15 ]; then
-            echo "$avail_gib GiB free, enough for the build"
-            exit 0
-          fi
-          # Keep only the selected Xcode
-          xcode=$(basename "$(cd "$(xcode-select -p)/../.." && pwd -P)")
-          sudo find /Applications -maxdepth 1 -type d -name "Xcode_*.app" ! -name "$xcode" -exec rm -rf {} +
+          df -hI /dev/disk3s1s1
+          sudo find /Applications -maxdepth 1 -type d -name "Xcode_*.app" ! -name "Xcode_15.4.app" -exec rm -rf {} +
           sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/*
-          df -hI /
+          df -hI /dev/disk3s1s1
 
       - name: Build slicer mac
         if: runner.os == 'macOS' && !inputs.macos-combine-only
@@ -263,96 +274,8 @@ jobs:
           ./build_release_macos.sh -u -x ${{ !vars.SELF_HOSTED && '-j 3' || '' }} -a universal -t 10.15
 
  # Thanks to RaySajuuk, it's working now
-      - name: Sign app and notary
-        if: github.repository == 'OrcaSlicer/OrcaSlicer' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && runner.os == 'macOS' && inputs.macos-combine-only
-        timeout-minutes: 30
-        working-directory: ${{ github.workspace }}
-        env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
-        run: |
-          # Load the `retry` helper (retries flaky commands such as `hdiutil create`).
-          source ${{ github.workspace }}/scripts/retry.sh
-          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode --output $CERTIFICATE_PATH
-          security create-keychain -p $KEYCHAIN_PASSWORD $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p $KEYCHAIN_PASSWORD $KEYCHAIN_PATH
-          # Set the temporary keychain as the default to prevent codesign from accessing the locked login keychain
-          security default-keychain -s "$KEYCHAIN_PATH"
-          security import $CERTIFICATE_PATH -P $P12_PASSWORD -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $P12_PASSWORD $KEYCHAIN_PATH
-          # codesign --deep is deprecated and cannot sign the bundled Python
-          # runtime (see relocate_python_runtime in build_release_macos.sh).
-          # Sign every nested Mach-O in the bundle explicitly -- notarization
-          # requires the hardened-runtime signature on each -- then seal the
-          # bundle itself last, and verify so coverage gaps fail at CI time
-          # rather than at notarization.
-          ENTITLEMENTS=${{ github.workspace }}/scripts/disable_validation.entitlements
-          sign() {
-            codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CERTIFICATE_ID" "$@"
-          }
-          sign_app() {
-            local app="$1"
-            local machos=()
-            # file is batched via xargs (per-file it costs minutes); universal
-            # binaries also print per-architecture lines, dropped by grep -v.
-            while IFS= read -r f; do machos+=("$f"); done < <(
-              find "$app" -type f -print0 |
-                xargs -0 file --no-pad --mime-type -- |
-                grep -v ' (for architecture ' |
-                grep ': application/x-mach-binary$' |
-                sed 's|: application/x-mach-binary$||'
-            )
-            if [ "${#machos[@]}" -eq 0 ]; then
-              echo "ERROR: no Mach-O files found in $app -- detection is broken" >&2
-              exit 1
-            fi
-            echo "signing ${#machos[@]} Mach-O files in $app"
-            sign "${machos[@]}"
-            sign --verbose "$app"
-            codesign --verify --deep --strict --verbose=2 "$app"
-          }
-          sign_app "${{ github.workspace }}/build/universal/OrcaSlicer/OrcaSlicer.app"
-          # Sign OrcaSlicer_profile_validator.app if it exists
-          if [ -f "${{ github.workspace }}/build/universal/OrcaSlicer/OrcaSlicer_profile_validator.app/Contents/MacOS/OrcaSlicer_profile_validator" ]; then
-            sign_app "${{ github.workspace }}/build/universal/OrcaSlicer/OrcaSlicer_profile_validator.app"
-          fi
-          
-          # Create main OrcaSlicer DMG without the profile validator helper
-          mkdir -p ${{ github.workspace }}/build/universal/OrcaSlicer_dmg
-          rm -rf ${{ github.workspace }}/build/universal/OrcaSlicer_dmg/*
-          cp -R ${{ github.workspace }}/build/universal/OrcaSlicer/OrcaSlicer.app ${{ github.workspace }}/build/universal/OrcaSlicer_dmg/
-          ln -sfn /Applications ${{ github.workspace }}/build/universal/OrcaSlicer_dmg/Applications
-          retry hdiutil create -volname "OrcaSlicer" -srcfolder ${{ github.workspace }}/build/universal/OrcaSlicer_dmg -ov -format UDZO OrcaSlicer_Mac_universal_${{ env.ver }}.dmg
-          codesign --deep --force --verbose --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CERTIFICATE_ID" OrcaSlicer_Mac_universal_${{ env.ver }}.dmg
-          
-          # Create separate OrcaSlicer_profile_validator DMG if the app exists
-          if [ -f "${{ github.workspace }}/build/universal/OrcaSlicer/OrcaSlicer_profile_validator.app/Contents/MacOS/OrcaSlicer_profile_validator" ]; then
-            mkdir -p ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg
-            rm -rf ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg/*
-            cp -R ${{ github.workspace }}/build/universal/OrcaSlicer/OrcaSlicer_profile_validator.app ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg/
-            ln -sfn /Applications ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg/Applications
-            retry hdiutil create -volname "OrcaSlicer Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg -ov -format UDZO OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
-            codesign --deep --force --verbose --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CERTIFICATE_ID" OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
-          fi
-          
-          # Notarize main DMG
-          xcrun notarytool submit "OrcaSlicer_Mac_universal_${{ env.ver }}.dmg" --apple-id "${{ secrets.APPLE_DEV_ACCOUNT }}" --team-id "${{ secrets.TEAM_ID }}" --password "${{ secrets.APP_PWD }}" --wait
-          retry xcrun stapler staple OrcaSlicer_Mac_universal_${{ env.ver }}.dmg
-
-          # Notarize profile validator DMG if it exists
-          if [ -f "OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg" ]; then
-            xcrun notarytool submit "OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg" --apple-id "${{ secrets.APPLE_DEV_ACCOUNT }}" --team-id "${{ secrets.TEAM_ID }}" --password "${{ secrets.APP_PWD }}" --wait
-            retry xcrun stapler staple OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
-          fi
-
       - name: Create DMG without notary
-        if: github.ref != 'refs/heads/main' && runner.os == 'macOS' && inputs.macos-combine-only
+        if: runner.os == 'macOS' && inputs.macos-combine-only
         working-directory: ${{ github.workspace }}
         run: |
           # Load the `retry` helper (retries flaky commands such as `hdiutil create`).
@@ -398,19 +321,26 @@ jobs:
           if-no-files-found: ignore
 
       - name: Deploy Mac release
-        if: github.repository == 'OrcaSlicer/OrcaSlicer' && github.ref == 'refs/heads/main' && runner.os == 'macOS' && inputs.macos-combine-only && !vars.SELF_HOSTED
-        uses: ./.github/actions/deploy-nightly
+        if: github.repository == 'Jacob10383/OrcaSlicer' && env.deploy_nightly == 'true' && runner.os == 'macOS' && inputs.macos-combine-only && !vars.SELF_HOSTED
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ${{ github.workspace }}/OrcaSlicer_Mac_universal_${{ env.ver }}.dmg
-          asset_name: OrcaSlicer_Mac_universal_nightly.dmg
+          asset_name: OrcaSlicer_Mac_universal_nightly${{ env.nightly_suffix }}.dmg
+          asset_content_type: application/octet-stream
+          max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
 
-      # The DMG is only built when the validator app was.
       - name: Deploy Mac OrcaSlicer_profile_validator DMG release
-        if: github.repository == 'OrcaSlicer/OrcaSlicer' && github.ref == 'refs/heads/main' && runner.os == 'macOS' && inputs.macos-combine-only && !vars.SELF_HOSTED && hashFiles(format('OrcaSlicer_profile_validator_Mac_universal_{0}.dmg', env.ver)) != ''
-        uses: ./.github/actions/deploy-nightly
+        if: github.repository == 'Jacob10383/OrcaSlicer' && github.ref == 'refs/heads/main' && runner.os == 'macOS' && inputs.macos-combine-only && !vars.SELF_HOSTED
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ${{ github.workspace }}/OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
           asset_name: OrcaSlicer_profile_validator_Mac_universal_nightly.dmg
+          asset_content_type: application/octet-stream
+          max_releases: 1
 
 # Windows
       - name: Set Windows build variables
@@ -429,53 +359,23 @@ jobs:
         if: runner.os == 'Windows'
         uses: microsoft/setup-msbuild@v3
 
-      # NSIS builds the installer. A pinned portable copy is kept in the Actions
-      # cache, so most runs never download it, and a cache miss fetches the
-      # release archive from SourceForge instead of going through the Chocolatey
-      # community feed, which hosted runners often cannot reach. Prepending it to
-      # PATH also makes cpack use it over the NSIS preinstalled on some images.
-      - name: Restore NSIS
-        id: nsis-cache
+      - name: Install nsis
         if: runner.os == 'Windows' && !vars.SELF_HOSTED
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ runner.temp }}/nsis
-          key: nsis-${{ env.NSIS_VERSION }}
-
-      - name: Install NSIS
-        if: runner.os == 'Windows' && !vars.SELF_HOSTED
-        shell: pwsh
         run: |
           dir "C:/Program Files (x86)/Windows Kits/10/Include"
-          $nsisDir = Join-Path $env:RUNNER_TEMP 'nsis'
-          $makensis = Join-Path $nsisDir 'makensis.exe'
-          if (-not (Test-Path $makensis)) {
-            $zip = Join-Path $env:RUNNER_TEMP "nsis-$env:NSIS_VERSION.zip"
-            curl.exe -fsSL --retry 5 --retry-all-errors --retry-delay 15 -o $zip "https://downloads.sourceforge.net/project/nsis/NSIS%203/$env:NSIS_VERSION/nsis-$env:NSIS_VERSION.zip"
-            if ($LASTEXITCODE -ne 0) { throw "NSIS $env:NSIS_VERSION download failed." }
-            if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:NSIS_SHA256) {
-              throw "NSIS $env:NSIS_VERSION archive does not match its pinned SHA256."
-            }
-            Expand-Archive $zip $env:RUNNER_TEMP
-            Move-Item (Join-Path $env:RUNNER_TEMP "nsis-$env:NSIS_VERSION") $nsisDir
-          }
-          & $makensis /VERSION
-          $nsisDir | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
-
-      - name: Save NSIS
-        if: runner.os == 'Windows' && !vars.SELF_HOSTED && steps.nsis-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ runner.temp }}/nsis
-          key: nsis-${{ env.NSIS_VERSION }}
+          choco install nsis
 
       - name: Build slicer Win
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
+        # Orca: Removed Netfabb STL fixing service support in favor of CGAL.
+        # env:
+        #   WindowsSdkDir: 'C:\Program Files (x86)\Windows Kits\10\'
+        #   WindowsSDKVersion: '10.0.26100.0\'
         # --tests builds the unit tests too; the unit_tests_windows_* jobs run them.
         run: |
           # cache-path is the install directory inside the deps build directory.
-          $deps = (Split-Path "${{ github.workspace }}/${{ inputs.cache-path }}").Replace('\', '/')
+          $deps = (Split-Path "${{ inputs.cache-path }}").Replace('\', '/')
           # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.
           $flags = if ("${{ inputs.compiler }}" -eq "clang") { "-l", "-x" } else { "--msvc", "--msbuild" }
           .\build_win.bat -s --tests -i --arch ${{ inputs.arch }} --build-dir $env:BUILD_DIR --deps-dir $deps @flags
@@ -553,28 +453,37 @@ jobs:
           path: ${{ github.workspace }}/build/src/Release/OrcaSlicer_profile_validator.exe
 
       - name: Deploy Windows release portable
-        if: github.repository == 'OrcaSlicer/OrcaSlicer' && github.ref == 'refs/heads/main' && runner.os == 'Windows' && !vars.SELF_HOSTED
-        uses: ./.github/actions/deploy-nightly
+        if: github.repository == 'Jacob10383/OrcaSlicer' && env.deploy_nightly == 'true' && runner.os == 'Windows' && !vars.SELF_HOSTED
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer_Windows_${{ env.ver }}${{ env.ARCH_SUFFIX }}_portable.zip
-          asset_name: OrcaSlicer_Windows${{ env.ARCH_SUFFIX }}_nightly_portable.zip
-          content_type: application/x-zip-compressed
+          asset_name: OrcaSlicer_Windows${{ env.ARCH_SUFFIX }}_nightly${{ env.nightly_suffix }}_portable.zip
+          asset_content_type: application/x-zip-compressed
+          max_releases: 1
 
       - name: Deploy Windows release installer
-        if: github.repository == 'OrcaSlicer/OrcaSlicer' && github.ref == 'refs/heads/main' && runner.os == 'Windows' && !vars.SELF_HOSTED
-        uses: ./.github/actions/deploy-nightly
+        if: github.repository == 'Jacob10383/OrcaSlicer' && env.deploy_nightly == 'true' && runner.os == 'Windows' && !vars.SELF_HOSTED
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer_Windows_Installer_${{ env.ver }}${{ env.ARCH_SUFFIX }}.exe
-          asset_name: OrcaSlicer_Windows_Installer${{ env.ARCH_SUFFIX }}_nightly.exe
-          content_type: application/x-msdownload
+          asset_name: OrcaSlicer_Windows_Installer${{ env.ARCH_SUFFIX }}_nightly${{ env.nightly_suffix }}.exe
+          asset_content_type: application/x-msdownload
+          max_releases: 1
 
       - name: Deploy Windows OrcaSlicer_profile_validator release
-        if: github.repository == 'OrcaSlicer/OrcaSlicer' && github.ref == 'refs/heads/main' && runner.os == 'Windows' && inputs.arch != 'arm64' && !vars.SELF_HOSTED
-        uses: ./.github/actions/deploy-nightly
+        if: github.repository == 'Jacob10383/OrcaSlicer' && github.ref == 'refs/heads/main' && runner.os == 'Windows' && inputs.arch != 'arm64' && !vars.SELF_HOSTED
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ${{ github.workspace }}/build/src/Release/OrcaSlicer_profile_validator.exe
           asset_name: OrcaSlicer_profile_validator_Windows_nightly.exe
-          content_type: application/x-msdownload
+          asset_content_type: application/x-msdownload
+          max_releases: 1
 
       - name: Build MSIX Store package Win
         if: runner.os == 'Windows' && !vars.SELF_HOSTED
@@ -702,37 +611,56 @@ jobs:
           path: './build/src/dev-utils/Release/generate_system_cache'
 
       - name: Deploy Ubuntu release
-        if: ${{ github.repository == 'OrcaSlicer/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED }}
-        uses: ./.github/actions/deploy-nightly
+        if: ${{ github.repository == 'Jacob10383/OrcaSlicer' && ! env.ACT && env.deploy_nightly == 'true' && runner.os == 'Linux' && !vars.SELF_HOSTED }}
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ./build/OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch_suffix }}_${{ env.ver }}.AppImage
-          asset_name: OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch_suffix }}_nightly.AppImage
+          asset_name: OrcaSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch_suffix }}_nightly${{ env.nightly_suffix }}.AppImage
+          asset_content_type: application/octet-stream
+          max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
       - name: Deploy Ubuntu release
-        if: ${{ github.repository == 'OrcaSlicer/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
-        run: |
-          git -c user.name="${GITHUB_ACTOR}" -c user.email="${GITHUB_ACTOR}@users.noreply.github.com" tag -f -a nightly-builds "${GITHUB_SHA}" -m nightly-builds
-          git push -f origin refs/tags/nightly-builds
+        if: ${{ github.repository == 'Jacob10383/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
+        uses: rickstaa/action-create-tag@v1
+        with:
+          tag: "nightly-builds"
+          tag_exists_error: false
+          force_push_tag: true
+          message: "nightly-builds"
 
       - name: Deploy Ubuntu OrcaSlicer_profile_validator release
-        if: ${{ github.repository == 'OrcaSlicer/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
-        uses: ./.github/actions/deploy-nightly
+        if: ${{ github.repository == 'Jacob10383/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ./build/src/Release/OrcaSlicer_profile_validator
           asset_name: OrcaSlicer_profile_validator_Linux${{ env.ubuntu-ver-str }}_nightly
+          asset_content_type: application/octet-stream
+          max_releases: 1
 
       - name: Deploy Ubuntu generate_system_cache release
-        if: ${{ github.repository == 'OrcaSlicer/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
-        uses: ./.github/actions/deploy-nightly
+        if: ${{ github.repository == 'Jacob10383/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ./build/src/dev-utils/Release/generate_system_cache
           asset_name: generate_system_cache_Linux${{ env.ubuntu-ver-str }}_nightly
+          asset_content_type: application/octet-stream
+          max_releases: 1
 
       - name: Deploy orca_custom_preset_tests
-        if: ${{ github.repository == 'OrcaSlicer/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
-        uses: ./.github/actions/deploy-nightly
+        if: ${{ github.repository == 'Jacob10383/OrcaSlicer' && ! env.ACT && github.ref == 'refs/heads/main' && runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64' }}
+        uses: WebFreak001/deploy-nightly@v3.2.0
         with:
+          upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+          release_id: 344377894
           asset_path: ${{ github.workspace }}/resources/profiles/orca_custom_preset_tests.zip
           asset_name: orca_custom_preset_tests.zip
+          asset_content_type: application/octet-stream
+          max_releases: 1
 
       # The build has just touched everything it can use, so an object
       # untouched for a week is dead, usually orphaned by a flag change.
@@ -766,13 +694,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The save step reports success even when its tar failed, so keep
-          # the older entries unless the new one is listed.
-          if ! gh cache list --ref "$GITHUB_REF" --key "$CCACHE_ENTRY" --json key \
-              | jq -e --arg entry "$CCACHE_ENTRY" 'any(.[]; .key == $entry)' > /dev/null; then
-            echo "$CCACHE_ENTRY was not saved; keeping the older entries."
-            exit 0
-          fi
           gh cache list --ref "$GITHUB_REF" --key "ccache-$CCACHE_LEG-" --limit 100 --json id,key \
             | jq -r --arg prefix "ccache-$CCACHE_LEG-" --argjson run "$GITHUB_RUN_ID" \
                 '.[] | select((.key | ltrimstr($prefix) | split("-")[0] | tonumber?) < $run) | .id' \
