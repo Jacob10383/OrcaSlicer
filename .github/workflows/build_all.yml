@@ -54,6 +54,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -87,7 +90,7 @@ jobs:
           && '[{"arch":"","os":"orca-lnx-server"}]'
           || '[{"arch":"","os":"ubuntu-24.04"},{"arch":"aarch64","os":"ubuntu-24.04-arm"}]') }}
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'Jacob10383/OrcaSlicer') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
@@ -105,7 +108,7 @@ jobs:
           || '[{"arch":"x64","os":"windows-latest","compiler":"clang"},{"arch":"arm64","os":"windows-11-vs2026-arm","compiler":"clang"}]') }}
     needs: check_build_script
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && needs.check_build_script.result == 'success' && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && needs.check_build_script.result == 'success' && (github.event_name != 'schedule' || github.repository == 'Jacob10383/OrcaSlicer') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
@@ -122,7 +125,7 @@ jobs:
           - arm64
           - x86_64
     # Don't run scheduled builds on forks:
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'Jacob10383/OrcaSlicer') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-macos-arm64' || 'macos-14' }}
@@ -133,7 +136,7 @@ jobs:
   build_macos_universal:
     name: Build macOS Universal
     needs: build_macos_arch
-    if: ${{ !cancelled() && needs.build_macos_arch.result == 'success' && !inputs.build-deps-only && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && needs.build_macos_arch.result == 'success' && !inputs.build-deps-only && (github.event_name != 'schedule' || github.repository == 'Jacob10383/OrcaSlicer') }}
     uses: ./.github/workflows/build_orca.yml
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-macos-arm64' || 'macos-14' }}
@@ -183,11 +186,9 @@ jobs:
       os: ${{ vars.SELF_HOSTED && 'orca-macos-arm64' || 'macos-14' }}
       artifact: ${{ github.sha }}-tests-macos-arm64
       test-dir: build/arm64/tests
-  # Slice a two-colour cube through every shipped printer, and through every
-  # system process/filament whose templates no printer's own slice reaches, so
-  # every custom g-code and filename_format shipped is expanded (names in {if}
-  # branches not taken included) - catches slicing regressions the static
-  # profile checks and unit tests can't see.
+  # Slice a two-colour cube through every shipped printer so all custom g-code
+  # (change_filament_gcode, machine start/end, etc.) is expanded - catches
+  # slicing regressions the static profile checks and unit tests can't see.
   # Profile-only PRs are covered by check_profiles.yml's nightly binary; this
   # covers src/engine PRs with the PR-built binary.
   slice_check_linux:
@@ -253,7 +254,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     # Don't run scheduled builds on forks; skip entirely on self-hosted runners
-    if: ${{ !cancelled() && !vars.SELF_HOSTED && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && !vars.SELF_HOSTED && (github.event_name != 'schedule' || github.repository == 'Jacob10383/OrcaSlicer') }}
 
     runs-on: ${{ matrix.variant.runner }}
     env:
@@ -415,14 +416,6 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: |
         api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches"
-        # The save step reports success even when its tar failed, so keep
-        # the older entries unless the new one is listed.
-        if ! curl -sSf -H "Authorization: Bearer $GH_TOKEN" \
-            "$api?ref=$GITHUB_REF&key=$CCACHE_ENTRY" \
-            | jq -e --arg entry "$CCACHE_ENTRY" 'any(.actions_caches[]; .key == $entry)' > /dev/null; then
-          echo "$CCACHE_ENTRY was not saved; keeping the older entries."
-          exit 0
-        fi
         curl -sSf -H "Authorization: Bearer $GH_TOKEN" \
           "$api?ref=$GITHUB_REF&key=ccache-$CCACHE_LEG-&per_page=100" \
           | jq -r --arg prefix "ccache-$CCACHE_LEG-" --argjson run "$GITHUB_RUN_ID" \
@@ -437,11 +430,11 @@ jobs:
         name: OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
         path: '/__w/OrcaSlicer/OrcaSlicer/OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak'
     - name: Deploy Flatpak to nightly release
-      if: github.repository == 'OrcaSlicer/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/belt-printer')
+      if: github.repository == 'Jacob10383/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/belt-printer')
       uses: WebFreak001/deploy-nightly@v3.2.0
       with:
-        upload_url: https://uploads.github.com/repos/OrcaSlicer/OrcaSlicer/releases/137995723/assets{?name,label}
-        release_id: 137995723
+        upload_url: https://uploads.github.com/repos/Jacob10383/OrcaSlicer/releases/344377894/assets{?name,label}
+        release_id: 344377894
         asset_path: /__w/OrcaSlicer/OrcaSlicer/OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
         asset_name: OrcaSlicer-Linux-flatpak_nightly${{ env.nightly_suffix }}_${{ matrix.variant.arch }}.flatpak
         asset_content_type: application/octet-stream
