@@ -1,4 +1,6 @@
 #include "MoonrakerPrinterAgent.hpp"
+#include "BoxFilamentSync.hpp"
+#include "CrealityPrintAgent.hpp"
 #include "Http.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -578,7 +580,45 @@ void MoonrakerPrinterAgent::build_ams_payload(int ams_count, int max_lane_index,
     }
 }
 
-bool MoonrakerPrinterAgent::fetch_filament_info(std::string dev_id)
+bool MoonrakerPrinterAgent::fetch_filament_info(std::string)
+{
+    return fetch_box_filament_info() || fetch_standard_filament_info();
+}
+
+bool MoonrakerPrinterAgent::fetch_box_filament_info()
+{
+    std::vector<BoxFilamentSlot> slots;
+    std::string error;
+    if (!fetch_box_filament_status(device_info.base_url, device_info.api_key, slots, error)) {
+        BOOST_LOG_TRIVIAL(debug) << "Moonraker box sync unavailable: " << error;
+        return false;
+    }
+
+    auto* bundle = GUI::wxGetApp().preset_bundle;
+    std::vector<AmsTrayData> trays;
+    for (const auto& slot : slots) {
+        AmsTrayData tray;
+        tray.slot_index = slot.index;
+        // 'loaded' means selected into the toolhead. 'present' means there is
+        // a spool to sync. An external holder is always present in API v1,
+        // but without a profile it has no known filament to import.
+        tray.has_filament = slot.has_filament();
+        if (tray.has_filament) {
+            tray.tray_type = CrealityPrintAgent::normalize_filament_type(trim_and_upper(slot.material));
+            tray.tray_color = slot.color;
+            if (bundle)
+                tray.tray_info_idx = CrealityPrintAgent::match_filament_preset(
+                    bundle->filaments, slot.brand, slot.name, tray.tray_type);
+        }
+        trays.push_back(std::move(tray));
+    }
+    const int max_index = slots.back().index;
+    build_ams_payload((max_index + 4) / 4, max_index, trays);
+    BOOST_LOG_TRIVIAL(info) << "Moonraker box API v1: synced " << slots.size() << " slots";
+    return true;
+}
+
+bool MoonrakerPrinterAgent::fetch_standard_filament_info()
 {
     std::vector<AmsTrayData> trays;
     int max_lane_index = 0;

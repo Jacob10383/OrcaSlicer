@@ -696,6 +696,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/CrealityPrint.hpp
     Utils/CrealityPrintAgent.cpp
     Utils/CrealityPrintAgent.hpp
+    Utils/BoxFilamentSync.cpp
+    Utils/BoxFilamentSync.hpp
     Utils/CrealityHostDiscovery.cpp
     Utils/CrealityHostDiscovery.hpp
     Utils/Duet.cpp
