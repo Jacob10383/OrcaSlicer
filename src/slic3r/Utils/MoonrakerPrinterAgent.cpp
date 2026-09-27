@@ -1166,7 +1166,15 @@ bool MoonrakerPrinterAgent::init_device_info(std::string dev_id, std::string dev
     const auto& printer_cfg = preset.config;
     device_info.dev_ip      = dev_ip;
 
-    device_info.api_key    = password;
+    // Orca fills a missing access code with the Bambu placeholder "88888888" because its
+    // device code expects one. Sent to Moonraker as X-Api-Key it is an *invalid* key, and
+    // Moonraker rejects it (401) even for trusted clients that need no key at all.
+    // The device entry keeps whatever code it was created with, so a key entered in the
+    // printer's connection settings later never reaches it; prefer the preset's key.
+    std::string api_key = printer_cfg.has("printhost_apikey") ? printer_cfg.opt_string("printhost_apikey") : std::string();
+    if (api_key.empty() && password != "88888888")
+        api_key = password;
+    device_info.api_key    = api_key;
     device_info.model_name = printer_cfg.opt_string("printer_model");
     device_info.model_id   = preset.get_printer_type(preset_bundle);
     device_info.base_url   = use_ssl ? "https://" + dev_ip : "http://" + dev_ip;
