@@ -7,6 +7,7 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/DeviceCore/DevFilaSystem.h"
+#include "slic3r/GUI/DeviceCore/DevNozzleSystem.h"
 #include "slic3r/GUI/DeviceCore/DevManager.h"
 #include "../GUI/DeviceCore/DevStorage.h"
 #include "../GUI/DeviceCore/DevFirmware.h"
@@ -556,6 +557,8 @@ void MoonrakerPrinterAgent::build_ams_payload(int ams_count, int max_lane_index,
     // Set printer_type so update_sync_status() can match it against the preset's printer type.
     // Without this, the comparison fails and all sync badges are cleared.
     obj->printer_type = device_info.model_id;
+
+    populate_nozzle_info_from_preset(obj);
 
     // Set push counters so is_info_ready() returns true for pull-mode agents.
     if (obj->m_push_count == 0) {
@@ -1481,12 +1484,54 @@ void MoonrakerPrinterAgent::dispatch_printer_connected(const std::string& dev_id
         return;
     }
 
-    auto dispatch = [dev_id, connected_fn]() { connected_fn(dev_id); };
+    auto dispatch = [this, dev_id, connected_fn]() {
+        connected_fn(dev_id);
+        // Give the print dialog nozzle data as soon as the printer connects, even
+        // before the first filament sync.
+        if (auto* dev_manager = GUI::wxGetApp().getDeviceManager())
+            populate_nozzle_info_from_preset(dev_manager->get_my_machine(dev_id));
+    };
     if (queue_fn) {
         queue_fn(dispatch);
     } else {
         dispatch();
     }
+}
+
+void MoonrakerPrinterAgent::populate_nozzle_info_from_preset(MachineObject* obj) const
+{
+    if (!obj)
+        return;
+    auto* preset_bundle = GUI::wxGetApp().preset_bundle;
+    if (!preset_bundle)
+        return;
+    const DynamicPrintConfig& cfg = preset_bundle->printers.get_edited_preset().config;
+
+    float diameter = 0.0f;
+    if (const auto* opt = cfg.option<ConfigOptionFloats>("nozzle_diameter"); opt && !opt->values.empty())
+        diameter = static_cast<float>(opt->values.front());
+    if (diameter <= 0.0f) {
+        BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: printer preset has no nozzle_diameter; nozzle info not set";
+        return;
+    }
+
+    // nozzle_type is a per-extruder enum list, serialized like "hardened_steel" or
+    // "hardened_steel,brass". The first entry is the main extruder.
+    std::string type;
+    if (cfg.has("nozzle_type")) {
+        type = cfg.opt_serialize("nozzle_type");
+        type = type.substr(0, type.find(','));
+        boost::algorithm::trim(type);
+    }
+    if (type.empty() || type == "undefine") {
+        // Brass is the conservative choice: it never lets abrasive filament through
+        // on a nozzle the user has not declared as hardened.
+        BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: printer preset nozzle_type undefined; assuming brass";
+        type = "brass";
+    }
+
+    DevNozzleSystemParser::ParseV1_0(nlohmann::json(type), nlohmann::json(diameter), obj->GetNozzleSystem(), std::nullopt);
+    BOOST_LOG_TRIVIAL(info) << "MoonrakerPrinterAgent: nozzle info from preset: " << type << " " << diameter << "mm";
 }
 
 void MoonrakerPrinterAgent::start_status_stream(const std::string& dev_id, const std::string& base_url, const std::string& api_key)

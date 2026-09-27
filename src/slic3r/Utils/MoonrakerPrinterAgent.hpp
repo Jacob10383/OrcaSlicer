@@ -14,6 +14,8 @@
 
 namespace Slic3r {
 
+class MachineObject;
+
 class MoonrakerPrinterAgent : public IPrinterAgent
 {
 public:
@@ -101,6 +103,11 @@ protected:
 
     // Build ams JSON and call parser
     void build_ams_payload(int ams_count, int max_lane_index, const std::vector<AmsTrayData>& trays);
+
+    // Moonraker does not report nozzle hardware, so fill the MachineObject's nozzle
+    // information from the active printer preset. Without it the print dialog blocks
+    // with "Invalid nozzle information". Must run on the GUI thread.
+    void populate_nozzle_info_from_preset(MachineObject* obj) const;
 
     bool fetch_box_filament_info();
     bool fetch_standard_filament_info();
