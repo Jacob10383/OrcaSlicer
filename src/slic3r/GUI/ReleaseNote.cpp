@@ -1729,6 +1729,10 @@ void InputIpAddressDialog::set_machine_obj(MachineObject* obj)
     m_input_printer_name->GetTextCtrl()->SetLabelText(m_obj->get_dev_name());
 
     std::string img_str = DevPrinterConfigUtil::get_printer_connect_help_img(m_obj->printer_type);
+    // Orca: non-Bambu printers have no help image; "_en" alone is not a bitmap and threw,
+    // terminating the app. Fall back like ConnectPrinterDialog does.
+    if (img_str.empty())
+        img_str = "input_access_code_x1";
     auto diagram_bmp = create_scaled_bitmap(img_str + "_en", this, 198);
     m_img_help->SetBitmap(diagram_bmp);
 
