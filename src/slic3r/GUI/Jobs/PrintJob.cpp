@@ -15,6 +15,7 @@
 
 #include "slic3r/Utils/FileTransferUtils.hpp"
 #include "slic3r/Utils/BBLNetworkPlugin.hpp"
+#include "slic3r/Utils/NetworkAgentFactory.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -220,7 +221,15 @@ void PrintJob::process(Ctl &ctl)
     params.password = m_access_code;
 
     // check access code and ip address
-    if (this->connection_type == "lan" && m_print_type == "from_normal") {
+    // Orca: this probe (eMMC tunnel / FTP upload of check_access_code.txt) is Bambu-specific.
+    // Other printer agents (Moonraker, Creality, ...) already hold a verified connection, and the
+    // probe would upload a junk file or fail and pop the Bambu access-code dialog.
+    bool is_bbl_agent = true;
+    if (m_agent) {
+        if (auto printer_agent = m_agent->get_printer_agent())
+            is_bbl_agent = printer_agent->get_agent_info().id == BBL_PRINTER_AGENT_ID;
+    }
+    if (is_bbl_agent && this->connection_type == "lan" && m_print_type == "from_normal") {
         bool emmc_ok = false;
         bool ftp_ok = false;
         if (could_emmc_print) {
