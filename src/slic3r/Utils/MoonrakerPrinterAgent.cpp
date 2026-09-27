@@ -351,26 +351,48 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
     }
     // Determine the G-code file to upload
     // params.filename may be .3mf, params.dst_file contains actual G-code
+    namespace fs = boost::filesystem;
     std::string gcode_path = params.filename;
     if (!params.dst_file.empty()) {
         gcode_path = params.dst_file;
+    } else if (boost::iends_with(gcode_path, ".3mf")) {
+        // The print dialog hands over a Bambu-style .3mf bundle (G-code zipped inside).
+        // Klipper needs plain G-code, which the slicer wrote next to it with the same stem.
+        fs::path plain(gcode_path);
+        plain.replace_extension(".gcode");
+        if (fs::exists(plain))
+            gcode_path = plain.string();
+        else
+            BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: no plain G-code beside " << gcode_path;
     }
 
     // Check if file exists and has .gcode extension
-    namespace fs = boost::filesystem;
     fs::path source_path(gcode_path);
     if (!fs::exists(source_path)) {
         BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: G-code file does not exist: " << gcode_path;
         return BAMBU_NETWORK_ERR_FILE_NOT_EXIST;
     }
 
-    // Extract filename for upload (relative to gcodes root)
-    std::string upload_filename = source_path.filename().string();
+    // Name the upload after the project/plate. The temp file is named like ".1234.0.gcode";
+    // a leading dot makes it a hidden file, which Moonraker refuses.
+    std::string upload_filename = params.preset_name.empty() ? params.project_name : params.preset_name;
+    if (upload_filename.empty())
+        upload_filename = source_path.stem().string();
+    for (char& c : upload_filename) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (!(std::isalnum(uc) || c == '-' || c == '_' || c == '.' || uc >= 0x80))
+            c = '_'; // spaces etc. would need quoting in SDCARD_PRINT_FILE
+    }
+    while (!upload_filename.empty() && upload_filename.front() == '.')
+        upload_filename.erase(0, 1);
+    if (upload_filename.empty())
+        upload_filename = "print";
     if (!boost::iends_with(upload_filename, ".gcode")) {
         upload_filename += ".gcode";
     }
     // Sanitize filename to prevent path traversal attacks (extra safety)
     upload_filename = sanitize_filename(upload_filename);
+    BOOST_LOG_TRIVIAL(info) << "MoonrakerPrinterAgent: uploading " << gcode_path << " as " << upload_filename;
 
     // Upload file
     if (update_fn)
@@ -2085,7 +2107,8 @@ bool MoonrakerPrinterAgent::upload_gcode(const std::string& local_path,
             (void) status;
         })
         .on_error([&](std::string body, std::string err, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: Upload error: " << err << " HTTP " << status;
+            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: Upload error: " << err << " HTTP " << status
+                                     << " url=" << join_url(base_url, "/server/files/upload") << " body=" << body.substr(0, 500);
             http_error = err;
             result     = false;
         })
