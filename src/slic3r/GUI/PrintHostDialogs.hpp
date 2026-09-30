@@ -13,6 +13,7 @@
 #include "MsgDialog.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "../Utils/Flashforge.hpp"
+#include "../Utils/BoxPrintMapping.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ProjectTask.hpp"
 class wxButton;
@@ -31,6 +32,8 @@ namespace Slic3r {
 
 namespace GUI {
 
+class BoxPrintMappingPanel;
+
 class PrintHostSendDialog : public GUI::MsgDialog
 {
 public:
@@ -41,10 +44,13 @@ public:
     std::string group() const;
     std::string storage() const;
     bool switch_to_device_tab() const {return m_switch_to_device_tab;}
+    // Shows the Box slot panel and checks printer support without blocking the dialog.
+    void set_box_print_mapping(const Moonraker& host, const std::vector<BoxPrintTool>& tools,
+                               const wxString& plate_error = {});
 
     virtual void EndModal(int ret) override;
     virtual void init();
-    virtual std::map<std::string, std::string> extendedInfo() const { return {}; }
+    virtual std::map<std::string, std::string> extendedInfo() const;
 
 protected:
     wxTextCtrl *txt_filename;
@@ -59,6 +65,7 @@ protected:
     boost::filesystem::path m_path;
     PrintHostPostUploadActions m_post_actions;
     wxArrayString m_storage_names;
+    BoxPrintMappingPanel* m_box_mapping = nullptr;
 };
 
 

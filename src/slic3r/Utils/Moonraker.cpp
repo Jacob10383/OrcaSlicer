@@ -1,4 +1,5 @@
 #include "Moonraker.hpp"
+#include "BoxPrintMapping.hpp"
 
 #include <sstream>
 
@@ -44,6 +45,16 @@ std::string Moonraker::make_url(const std::string &path) const
         return (boost::format("%1%/%2%") % m_host % path).str();
     }
     return (boost::format("http://%1%/%2%") % m_host % path).str();
+}
+
+Http Moonraker::request(const std::string &path, bool post) const
+{
+    auto http = post ? Http::post(make_url(path)) : Http::get(make_url(path));
+    set_auth(http);
+#ifdef WIN32
+    http.ssl_revoke_best_effort(m_ssl_revoke_best_effort);
+#endif
+    return http;
 }
 
 void Moonraker::set_auth(Http &http) const
@@ -171,54 +182,15 @@ bool Moonraker::get_storage(wxArrayString &storage_path, wxArrayString &storage_
     return got_any;
 }
 
-bool Moonraker::start_print(wxString &error_msg, const std::string &filename) const
-{
-    //ORCA: POST /printer/print/start with JSON body { "filename": "<name>.gcode" }.
-    //      `filename` is what /server/files/upload returned as result.item.path (the storage-relative
-    //      path inside `root`, no leading slash, with extension). Build the body via property_tree
-    //      so that special characters in the filename (server-side collision-suffix could produce
-    //      paths with quotes / backslashes on exotic file systems) are properly escaped.
-    const char *name = get_name();
-    bool res = true;
-    auto url = make_url("printer/print/start");
-    pt::ptree body_tree;
-    body_tree.put("filename", filename);
-    std::ostringstream body_ss;
-    pt::write_json(body_ss, body_tree, /*pretty=*/false);
-    std::string body = body_ss.str();
-
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Starting print of %2% at %3%") % name % filename % url;
-
-    auto http = Http::post(std::move(url));
-    set_auth(http);
-    http.header("Content-Type", "application/json")
-        .set_post_body(body)
-        .on_complete([&](std::string body, unsigned status) {
-            BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: print/start HTTP %2%: %3%") % name % status % body;
-        })
-        .on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error starting print at %2%: %3%, HTTP %4%, body: `%5%`")
-                % name % url % error % status % body;
-            res = false;
-            error_msg = format_error(body, error, status);
-        })
-#ifdef WIN32
-        .ssl_revoke_best_effort(m_ssl_revoke_best_effort)
-#endif
-        .perform_sync();
-
-    return res;
-}
-
 bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, ErrorFn error_fn, InfoFn info_fn) const
 {
     //ORCA: POST /server/files/upload as multipart/form-data with:
     //          file = <gcode file>
     //          root = <storage root>     (Moonraker default: "gcodes")
     //      Successful response shape:
-    //          { "result": { "item": { "path": "<name>.gcode", "root": "<root>" }, "print_started": <bool> } }
-    //      We always start the print explicitly via /printer/print/start regardless of `print_started`
-    //      so the user can rely on a single call site for state.
+    //          { "item": { "path": "<name>.gcode", "root": "<root>" }, "print_started": <bool> }
+    //      Upload never requests automatic printing. Start separately so Box can
+    //      verify the uploaded file and install its selected map before execution.
     wxString test_msg;
     if (!test(test_msg)) {
         error_fn(std::move(test_msg));
@@ -232,10 +204,28 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
     //      fall back to the Moonraker-standard "gcodes" root. Reading it through here means a UI
     //      addition later (storage picker) needs no change to this method.
     const std::string root = upload_data.storage.empty() ? std::string("gcodes") : upload_data.storage;
+    // Moonraker and Box only start files from the gcodes root. A file uploaded
+    // elsewhere would start a same-named file from gcodes instead.
+    const bool start_print = upload_data.post_action == PrintHostPostUploadAction::StartPrint;
+    if (start_print && root != "gcodes") {
+        error_fn(wxString::FromUTF8("Printing requires the gcodes storage. Select gcodes, or upload without printing."));
+        return false;
+    }
 
     std::string url = make_url("server/files/upload");
     bool result = true;
     std::string uploaded_path;
+    std::string uploaded_root = root;
+    bool uploaded_path_confirmed = false;
+    const std::string box_mapping = upload_data.extended("box_mapping");
+    size_t uploaded_bytes = 0;
+    const auto report_progress = [&](Http::Progress progress, bool& cancel) {
+        // The queue marks 100% complete and disables cancellation. Keep it
+        // pending until file inspection and the print-start request finish.
+        if (start_print && progress.ultotal > 0 && progress.ulnow >= progress.ultotal)
+            progress.ulnow = progress.ultotal - 1;
+        progress_fn(std::move(progress), cancel);
+    };
 
     //ORCA: gcode inside a .gcode.3mf is index-coded (Metadata/plate_<N>.gcode), so the upload names the
     //      plate via a 1-based `plateindex` (set only in the .3mf path, see Plater::send_gcode_legacy);
@@ -264,18 +254,20 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
                 pt::ptree ptree;
                 pt::read_json(ss, ptree);
 
-                //ORCA: Moonraker confirms the storage-relative path in result.item.path. We pass exactly
+                //ORCA: Moonraker confirms the storage-relative path in item.path. We pass exactly
                 //      that string to /printer/print/start so any server-side renaming (collision suffix,
                 //      etc.) is respected.
-                const auto stored_path = ptree.get_optional<std::string>("result.item.path");
+                const auto stored_path = ptree.get_optional<std::string>("item.path");
+                uploaded_root = ptree.get<std::string>("item.root", root);
                 if (stored_path) {
                     uploaded_path = *stored_path;
+                    uploaded_path_confirmed = !uploaded_path.empty();
                 } else {
-                    //ORCA: fallback if the server response omits result.item.path (older Moonraker, or
-                    //      a buddy-fork that returns a slimmer envelope). Use the original filename.
+                    // Ordinary uploads retain the requested name. Mapped starts require
+                    // the server-confirmed path and reject this response below.
                     uploaded_path = upload_filename.string();
                     BOOST_LOG_TRIVIAL(warning) << boost::format(
-                        "%1%: upload response missing result.item.path, falling back to original filename `%2%`")
+                        "%1%: upload response missing item.path, falling back to original filename `%2%`")
                         % name % uploaded_path;
                 }
             } catch (const std::exception &ex) {
@@ -292,7 +284,8 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
             result = false;
         })
         .on_progress([&](Http::Progress progress, bool &cancel) {
-            progress_fn(std::move(progress), cancel);
+            uploaded_bytes = progress.ulnow;
+            report_progress(std::move(progress), cancel);
             if (cancel) {
                 BOOST_LOG_TRIVIAL(info) << name << ": Upload canceled";
                 result = false;
@@ -306,10 +299,40 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
     if (!result)
         return false;
 
-    if (upload_data.post_action == PrintHostPostUploadAction::StartPrint && !uploaded_path.empty()) {
-        wxString start_msg;
-        if (!start_print(start_msg, uploaded_path)) {
-            error_fn(std::move(start_msg));
+    if (start_print) {
+        if (!box_mapping.empty() && !uploaded_path_confirmed) {
+            error_fn(wxString::FromUTF8("Moonraker did not confirm the uploaded filename. The Box print was not started."));
+            return false;
+        }
+        if (uploaded_root != "gcodes") {
+            error_fn(wxString::FromUTF8("Moonraker stored the file outside gcodes. The print was not started."));
+            return false;
+        }
+        std::string error;
+        bool print_cancelled = false;
+        // PrintHostJobQueue only reports cancellation through the progress
+        // callback (PrintHostJobQueue::priv::progress_fn). Poll it with the
+        // held-back progress between Box requests. The full progress sent just
+        // before the start request completes the job, ending cancellation.
+        const auto proceed = [&](bool starting) {
+            bool cancel = false;
+            const std::string buffer;
+            const Http::Progress progress(0, 0, uploaded_bytes, uploaded_bytes, buffer);
+            if (starting)
+                progress_fn(progress, cancel);
+            else
+                report_progress(progress, cancel);
+            if (cancel) {
+                print_cancelled = true;
+                // A second callback reports the acknowledged cancellation to the queue.
+                progress_fn(progress, cancel);
+            }
+            return !cancel;
+        };
+        if (!start_box_print(*this, uploaded_path, box_mapping, error,
+                             [&] { return !proceed(false); }, [&] { return proceed(true); })) {
+            if (!print_cancelled)
+                error_fn(wxString::FromUTF8(error));
             return false;
         }
     }

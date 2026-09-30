@@ -31,7 +31,7 @@
 namespace Slic3r {
 namespace GUI {
 
-MsgDialog::MsgDialog(wxWindow *parent, const wxString &title, const wxString &headline, long style, wxBitmap bitmap, const wxString &forward_str)
+MsgDialog::MsgDialog(wxWindow *parent, const wxString &title, const wxString &headline, long style, wxBitmap bitmap, const wxString &forward_str, bool show_logo)
 	: DPIDialog(parent ? parent : dynamic_cast<wxWindow*>(wxGetApp().mainframe), wxID_ANY, title, wxDefaultPosition, wxSize(360, -1),wxDEFAULT_DIALOG_STYLE)
 	, boldfont(wxGetApp().normal_font())
 	, content_sizer(new wxBoxSizer(wxVERTICAL))
@@ -53,21 +53,25 @@ MsgDialog::MsgDialog(wxWindow *parent, const wxString &title, const wxString &he
 	//rightsizer->Add(headtext);
 	//rightsizer->AddSpacer(VERT_SPACING);
 
-	rightsizer->Add(content_sizer, 1, wxEXPAND | wxRIGHT, FromDIP(10));
+	rightsizer->Add(content_sizer, 1, wxEXPAND | wxRIGHT, FromDIP(show_logo ? 10 : BORDER));
 
-	logo = new wxStaticBitmap(this, wxID_ANY, bitmap.IsOk() ? bitmap : wxNullBitmap);
-    topsizer->Add(LOGO_SPACING, 0, 0, wxEXPAND, 0);
-	topsizer->Add(logo, 0, wxTOP, BORDER);
-    topsizer->Add(LOGO_GAP, 0, 0, wxEXPAND, 0);
-	topsizer->Add(rightsizer, 1, wxTOP | wxEXPAND, BORDER);
+    if (show_logo) {
+        logo = new wxStaticBitmap(this, wxID_ANY, bitmap.IsOk() ? bitmap : wxNullBitmap);
+        topsizer->Add(LOGO_SPACING, 0, 0, wxEXPAND, 0);
+        topsizer->Add(logo, 0, wxTOP, BORDER);
+        topsizer->Add(LOGO_GAP, 0, 0, wxEXPAND, 0);
+    } else {
+        topsizer->AddSpacer(FromDIP(BORDER));
+    }
+	topsizer->Add(rightsizer, 1, wxTOP | wxEXPAND, show_logo ? BORDER : FromDIP(BORDER));
 
     main_sizer->Add(topsizer, 1, wxEXPAND);
 
     m_dsa_sizer = new wxBoxSizer(wxHORIZONTAL);
-    btn_sizer->Add(0, 0, 0, wxLEFT, FromDIP(LOGO_SPACING + 64 + LOGO_GAP));
+    btn_sizer->Add(0, 0, 0, wxLEFT, FromDIP(show_logo ? LOGO_SPACING + 64 + LOGO_GAP : BORDER));
     btn_sizer->Add(m_dsa_sizer, 0, wxEXPAND);
     btn_sizer->AddStretchSpacer();
-    main_sizer->Add(btn_sizer, 0, wxBOTTOM | wxRIGHT | wxEXPAND | wxTOP, FromDIP(10));
+    main_sizer->Add(btn_sizer, 0, wxBOTTOM | wxRIGHT | wxEXPAND | wxTOP, FromDIP(show_logo ? 10 : BORDER));
 
     apply_style(style);
 	SetSizer(main_sizer);
@@ -219,7 +223,8 @@ void MsgDialog::apply_style(long style)
     if (style & wxNO)       add_button(wxID_NO, false,_L("No"));
     if (style & wxCANCEL)   add_button(wxID_CANCEL, false, _L("Cancel"));
 
-    logo->SetBitmap( create_scaled_bitmap(style & wxAPPLY        ? "completed" :
+    if (logo)
+        logo->SetBitmap( create_scaled_bitmap(style & wxAPPLY        ? "completed" :
                                           style & wxICON_WARNING        ? "exclamation" : // ORCA "exclamation" used for dialogs "obj_warning" used for 16x16 areas
                                           style & wxICON_INFORMATION    ? "info"        :
                                           style & wxICON_QUESTION       ? "question"    : "OrcaSlicer", this, 64, style & wxICON_ERROR));

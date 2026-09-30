@@ -82,6 +82,7 @@
 #include "libslic3r/CSGMesh/PerformCSGMeshBooleans.hpp"
 
 #include "GUI.hpp"
+#include "BoxPrintMappingDialog.hpp"
 #include "GUI_App.hpp"
 #include "Shortcuts.hpp"
 #include "GUI_ObjectList.hpp"
@@ -93,6 +94,7 @@
 #include "GUI_Factories.hpp"
 #include "wxExtensions.hpp"
 #include "../Utils/PrintHost.hpp"
+#include "../Utils/Moonraker.hpp"
 #include "MainFrame.hpp"
 #ifdef SLIC3R_CAD
 #include "slic3r/GUI/CAD/DesignPanel.hpp"
@@ -20196,6 +20198,18 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
         } else {
             pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
                                                          storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
+        }
+
+        if (host_type == htMoonraker) {
+            wxString plate_error;
+            if (use_3mf || resolved_plate_idx != get_partplate_list().get_curr_plate_index())
+                plate_error = _L("Box print mapping requires the current plate as a G-code file. Select the plate you want to print and disable Use 3MF before printing.");
+
+            const DynamicPrintConfig sliced_config = wxGetApp().preset_bundle->full_config();
+            PartPlate* selected_plate = resolved_plate_idx >= 0 ? get_partplate_list().get_plate(resolved_plate_idx) : nullptr;
+            // The dialog opens immediately; the panel checks Box support in the background.
+            pDlg->set_box_print_mapping(static_cast<const Moonraker&>(*upload_job.printhost),
+                                        collect_box_print_tools(selected_plate, sliced_config), plate_error);
         }
 
         pDlg->init();

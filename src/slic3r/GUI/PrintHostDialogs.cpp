@@ -1,4 +1,5 @@
 #include "PrintHostDialogs.hpp"
+#include "BoxPrintMappingDialog.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -424,8 +425,9 @@ static const char *CONFIG_KEY_GROUP = "printhost_group";
 static const char* CONFIG_KEY_STORAGE = "printhost_storage";
 
 PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUploadActions post_actions, const wxArrayString &groups, const wxArrayString& storage_paths, const wxArrayString& storage_names, bool switch_to_device_tab)
-    : MsgDialog(static_cast<wxWindow*>(wxGetApp().mainframe), _L("Send G-code to printer host"), _L("Upload to Printer Host with the following filename:"), 0) // Set style = 0 to avoid default creation of the "OK" button. 
-                                                                                                                                                               // All buttons will be added later in this constructor 
+    // Buttons are added by init(). This form does not need the message dialog's logo column.
+    : MsgDialog(static_cast<wxWindow*>(wxGetApp().mainframe), _L("Send G-code to printer host"),
+                _L("Upload to Printer Host with the following filename:"), 0, wxNullBitmap, wxEmptyString, false)
     , txt_filename(new wxTextCtrl(this, wxID_ANY))
     , combo_groups(!groups.IsEmpty() ? new wxComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, groups, wxCB_READONLY) : nullptr)
     , combo_storage(storage_names.GetCount() > 1 ? new wxComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, storage_names, wxCB_READONLY) : nullptr)
@@ -440,6 +442,14 @@ PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUplo
     txt_filename->OSXDisableAllSmartSubstitutions();
 #endif
 }
+void PrintHostSendDialog::set_box_print_mapping(const Moonraker& host, const std::vector<BoxPrintTool>& tools,
+                                               const wxString& plate_error)
+{
+    if (!m_box_mapping)
+        m_box_mapping = new BoxPrintMappingPanel(this);
+    m_box_mapping->lookup(host, tools, plate_error);
+}
+
 void PrintHostSendDialog::init()
 {
     const auto& path = m_path;
@@ -453,14 +463,14 @@ void PrintHostSendDialog::init()
     label_dir_hint->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
 
     content_sizer->Add(txt_filename, 0, wxEXPAND);
-    content_sizer->Add(label_dir_hint);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->Add(label_dir_hint, 0, wxTOP, FromDIP(4));
+    content_sizer->AddSpacer(FromDIP(10));
     
     if (combo_groups != nullptr) {
         // Repetier specific: Show a selection of file groups.
         auto *label_group = new wxStaticText(this, wxID_ANY, _L("Group"));
         content_sizer->Add(label_group);
-        content_sizer->Add(combo_groups, 0, wxBOTTOM, 2*VERT_SPACING);        
+        content_sizer->Add(combo_groups, 0, wxBOTTOM, FromDIP(10));
         wxString recent_group = from_u8(app_config->get("recent", CONFIG_KEY_GROUP));
         if (! recent_group.empty())
             combo_groups->SetValue(recent_group);
@@ -470,7 +480,7 @@ void PrintHostSendDialog::init()
         // PrusaLink specific: User needs to choose a storage
         auto* label_group = new wxStaticText(this, wxID_ANY, _L("Upload to storage") + ":");
         content_sizer->Add(label_group);
-        content_sizer->Add(combo_storage, 0, wxBOTTOM, 2 * VERT_SPACING);
+        content_sizer->Add(combo_storage, 0, wxBOTTOM, FromDIP(10));
         combo_storage->SetValue(storage_names.front());
         wxString recent_storage = from_u8(app_config->get("recent", CONFIG_KEY_STORAGE));
         if (!recent_storage.empty())
@@ -501,14 +511,16 @@ void PrintHostSendDialog::init()
         m_switch_to_device_tab = e.IsChecked();
         e.Skip();
     });
-    checkbox_sizer->Add(checkbox, 0, wxALL | wxALIGN_CENTER, FromDIP(2));
+    checkbox_sizer->Add(checkbox, 0, wxTOP | wxBOTTOM | wxALIGN_CENTER_VERTICAL, FromDIP(2));
 
     auto checkbox_text = new wxStaticText(this, wxID_ANY, _L("Switch to Device tab after upload."), wxDefaultPosition, wxDefaultSize, 0);
-    checkbox_sizer->Add(checkbox_text, 0, wxALL | wxALIGN_CENTER, FromDIP(2));
+    checkbox_sizer->Add(checkbox_text, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(4));
     checkbox_text->SetFont(::Label::Body_13);
     checkbox_text->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#323A3D")));
     content_sizer->Add(checkbox_sizer);
-    content_sizer->AddSpacer(VERT_SPACING);
+
+    if (m_box_mapping)
+        content_sizer->Add(m_box_mapping, 0, wxEXPAND | wxTOP, FromDIP(12));
 
     if (size_t extension_start = recent_path.find_last_of('.'); extension_start != std::string::npos)
         m_valid_suffix = recent_path.substr(extension_start);
@@ -543,7 +555,17 @@ void PrintHostSendDialog::init()
 
     if (post_actions.has(PrintHostPostUploadAction::StartPrint)) {
         auto* btn_print = add_button(wxID_YES, false, _L("Upload and Print"));
+        if (m_box_mapping) {
+            btn_print->Enable(m_box_mapping->ready_to_print());
+            m_box_mapping->Bind(wxEVT_BOX_PRINT_MAPPING_CHANGED, [this, btn_print](wxCommandEvent&) {
+                btn_print->Enable(m_box_mapping->ready_to_print());
+                Layout();
+                Fit();
+            });
+        }
         btn_print->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
+            if (m_box_mapping && !m_box_mapping->ready_to_print())
+                return;
             if (validate_path(txt_filename->GetValue())) {
                 post_upload_action = PrintHostPostUploadAction::StartPrint;
                 EndDialog(wxID_OK);
@@ -594,6 +616,16 @@ fs::path PrintHostSendDialog::filename() const
 PrintHostPostUploadAction PrintHostSendDialog::post_action() const
 {
     return post_upload_action;
+}
+
+std::map<std::string, std::string> PrintHostSendDialog::extendedInfo() const
+{
+    if (post_upload_action == PrintHostPostUploadAction::StartPrint && m_box_mapping) {
+        // Empty when the printer has no Box mapping support: that is an ordinary start.
+        if (const std::string mapping = m_box_mapping->serialized_mapping(); !mapping.empty())
+            return {{"box_mapping", mapping}};
+    }
+    return {};
 }
 
 std::string PrintHostSendDialog::group() const

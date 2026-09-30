@@ -463,6 +463,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrinterWebView.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
+    GUI/BoxPrintMappingDialog.cpp
+    GUI/BoxPrintMappingDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp
@@ -723,6 +725,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/CrealityPrintAgent.hpp
     Utils/BoxFilamentSync.cpp
     Utils/BoxFilamentSync.hpp
+    Utils/BoxPrintMapping.cpp
+    Utils/BoxPrintMapping.hpp
     Utils/CrealityHostDiscovery.cpp
     Utils/CrealityHostDiscovery.hpp
     Utils/Duet.cpp

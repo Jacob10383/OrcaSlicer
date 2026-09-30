@@ -10,6 +10,7 @@ class TextInput : public wxNavigationEnabled<StaticBox>
     wxSize labelSize;
     ScalableBitmap icon;
     ScalableBitmap icon_1;
+    bool          icon_on_right = false;
     StateColor     label_color;
     StateColor     text_color;
     wxTextCtrl * text_ctrl;
@@ -52,6 +53,9 @@ public:
 
     void SetIcon(const wxBitmap & icon);
     void SetIcon(const wxString & icon);
+
+    // Put the primary icon on the right, with spacing after the secondary icon.
+    void SetIconOnRight(bool right);
 
     void SetIcon_1(const wxString &icon);
     void SetIcon_1(const wxBitmap &icon);

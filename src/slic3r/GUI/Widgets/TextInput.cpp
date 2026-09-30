@@ -128,6 +128,15 @@ void TextInput::SetIcon(const wxString &icon)
     Rescale();
 }
 
+void TextInput::SetIconOnRight(bool right)
+{
+    if (icon_on_right == right)
+        return;
+    icon_on_right = right;
+    messureSize();
+    Refresh();
+}
+
 void TextInput::SetIcon_1(const wxString &icon) {
     if (this->icon_1.name() == icon.ToStdString())
         return;
@@ -200,21 +209,27 @@ void TextInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
     wxWindow::DoSetSize(x, y, width, height, sizeFlags);
     if (sizeFlags & wxSIZE_USE_EXISTING) return;
     wxSize size = GetSize();
-    wxPoint textPos = {5, 0};
+    wxPoint textPos = {icon_on_right ? FromDIP(8) : 5, 0};
+    int right_padding = icon_on_right ? FromDIP(8) : 10;
     if (this->icon.bmp().IsOk()) {
         wxSize szIcon = this->icon.GetBmpSize();
-        textPos.x += szIcon.x;
+        if (icon_on_right)
+            right_padding += szIcon.x + FromDIP(6);
+        else
+            textPos.x += szIcon.x;
     }
     if (this->icon_1.bmp().IsOk()) {
         wxSize szIcon = this->icon_1.GetBmpSize();
         textPos.x += (szIcon.x);
+        if (icon_on_right)
+            textPos.x += FromDIP(6);
     }
     bool align_right = GetWindowStyle() & wxALIGN_RIGHT;
     if (align_right)
         textPos.x += labelSize.x;
     if (text_ctrl) {
         wxSize textSize = text_ctrl->GetSize();
-        textSize.x = size.x - textPos.x - labelSize.x - 10;
+        textSize.x = size.x - textPos.x - labelSize.x - right_padding;
         if(textSize.x < -1) textSize.x = -1;
         text_ctrl->SetSize(textSize);
         text_ctrl->SetPosition({textPos.x, (size.y - textSize.y) / 2});
@@ -247,36 +262,48 @@ void TextInput::render(wxDC& dc)
     bool   align_center = GetWindowStyle() & wxALIGN_CENTER_HORIZONTAL;
     bool   align_right = GetWindowStyle() & wxALIGN_RIGHT;
     // start draw
-    wxPoint pt = {5, 0};
+    wxPoint pt = {icon_on_right ? FromDIP(8) : 5, 0};
+    int text_right = size.x - (icon_on_right ? FromDIP(8) : 5);
     if (icon.bmp().IsOk()) {
         wxSize szIcon = icon.GetBmpSize();
         pt.y = (size.y - szIcon.y) / 2;
-        if (align_center) {
-            if (pt.x * 2 + szIcon.x + 0 + labelSize.x < size.x)
-                pt.x = (size.x - (szIcon.x + 0 + labelSize.x)) / 2;
+        if (icon_on_right) {
+            dc.DrawBitmap(icon.bmp(), {text_right - szIcon.x, pt.y});
+            text_right -= szIcon.x + FromDIP(6);
+        } else {
+            if (align_center) {
+                if (pt.x * 2 + szIcon.x + 0 + labelSize.x < size.x)
+                    pt.x = (size.x - (szIcon.x + 0 + labelSize.x)) / 2;
+            }
+            dc.DrawBitmap(icon.bmp(), pt);
+            pt.x += (szIcon.x + szIcon.x * 0.2);
         }
-        dc.DrawBitmap(icon.bmp(), pt);
-        pt.x += (szIcon.x + szIcon.x * 0.2);
     }
     if (icon_1.bmp().IsOk()) {
         wxSize szIcon = icon_1.GetBmpSize();
         pt.y          = (size.y - szIcon.y) / 2;
         if (align_center) {
-            if (pt.x * 2 + szIcon.x + 0 + labelSize.x < size.x)
-                pt.x = (size.x - (szIcon.x + 0 + labelSize.x)) / 2;
+            const int content_width = szIcon.x + labelSize.x + (icon_on_right ? FromDIP(6) : 0);
+            const int content_right = icon_on_right ? text_right : size.x;
+            if (pt.x * 2 + content_width < content_right)
+                pt.x = (content_right - content_width) / 2;
         }
-        pt.x += szIcon.x / 4.f;
+        if (!icon_on_right)
+            pt.x += szIcon.x / 4.f;
         dc.DrawBitmap(icon_1.bmp(), pt);
-        pt.x += szIcon.x + 0;
+        pt.x += szIcon.x + (icon_on_right ? FromDIP(6) : 0);
     }
     auto text = wxWindow::GetLabel();
     if (!text.IsEmpty()) {
+        const int text_width = icon_on_right ? std::max(0, text_right - pt.x) : text_right - pt.x;
+        if (icon_on_right)
+            dc.SetFont(align_right ? GetFont() : Label::Body_12);
         if (static_tips.IsEmpty()) {
             wxSize textSize = text_ctrl->GetSize();
             if (align_right || align_center)
             {
-                if (pt.x + labelSize.x + 5 > size.x)
-                    text = wxControl::Ellipsize(text, dc, wxELLIPSIZE_END, size.x - pt.x - 5);
+                if (pt.x + labelSize.x > text_right)
+                    text = wxControl::Ellipsize(text, dc, wxELLIPSIZE_END, text_width);
                 pt.y = (size.y - labelSize.y) / 2;
             }
             else
@@ -293,8 +320,8 @@ void TextInput::render(wxDC& dc)
         } else {
             wxSize textSize = text_ctrl->GetSize();
             if (align_right || align_center) {
-                if (pt.x + labelSize.x + 5 > size.x)
-                    text = wxControl::Ellipsize(text, dc, wxELLIPSIZE_END, size.x - pt.x - 5);
+                if (pt.x + labelSize.x > text_right)
+                    text = wxControl::Ellipsize(text, dc, wxELLIPSIZE_END, text_width);
                 pt.y = (size.y - labelSize.y - static_tips_size.y - 8) / 2;
             } else {
                 pt.x += textSize.x;
@@ -323,7 +350,10 @@ void TextInput::render(wxDC& dc)
             wxFont font = GetFont();
             font.SetPointSize(font.GetPointSize() - 1);// use smaller font
             dc.SetFont(font);
-            dc.DrawText(static_tips, pt);
+            const wxString tips = icon_on_right
+                ? wxControl::Ellipsize(static_tips, dc, wxELLIPSIZE_END, std::max(0, text_right - pt.x))
+                : static_tips;
+            dc.DrawText(tips, pt);
         }
     }
 }

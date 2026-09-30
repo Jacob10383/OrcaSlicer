@@ -17,12 +17,15 @@ class Http;
 // Moonraker is the JSON / WebSocket gateway that ships in front of Klipper
 // (and on Klipper-API-compatible firmwares like the Prusa-Firmware-Buddy
 // Buddy-Klipper fork). REST shape differs from OctoPrint: distinct paths,
-// JSON body for print/start, {"result":...}/{"error":...} envelope.
+// JSON body for print/start. Upload returns item.path directly; other endpoints
+// use the {"result":...}/{"error":...} envelope.
 //
 // Endpoints used:
 //   GET  /server/info                      -- connection test, reads klippy_state
 //   POST /server/files/upload (multipart)  -- upload gcode (form fields: file, root)
-//   POST /printer/print/start (json)       -- {"filename":"<name>.gcode"} starts print
+//   POST /printer/print/start (json)       -- ordinary printing
+//   GET  /printer/objects/query?box        -- Box mapping capability and slots
+//   POST /printer/gcode/script (json)      -- BOX_PRINT_INFO / BOX_PRINT_START
 //
 // Auth: X-Api-Key header if `printhost_apikey` is non-empty; Moonraker accepts
 // unauthenticated LAN access by default, so the key is optional. HTTP Basic /
@@ -46,6 +49,8 @@ public:
     bool get_storage(wxArrayString &storage_path, wxArrayString &storage_name) const override;
     const std::string& get_apikey() const { return m_apikey; }
     const std::string& get_cafile() const { return m_cafile; }
+    // Authenticated request to this host. Box print mapping uses it for its JSON calls.
+    Http request(const std::string& path, bool post) const;
 
 protected:
     std::string m_host;
@@ -55,7 +60,6 @@ protected:
 
     void set_auth(Http &http) const;
     std::string make_url(const std::string &path) const;
-    bool start_print(wxString &error_msg, const std::string &filename) const;
 };
 
 }
