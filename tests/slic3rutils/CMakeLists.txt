@@ -5,6 +5,7 @@ add_executable(${_TEST_NAME}_tests
     test_config_value_formatter.cpp
     test_creality_cfs_match.cpp
     test_box_filament_sync.cpp
+    test_box_print_mapping.cpp
     test_dev_mapping.cpp
     test_device_access.cpp
     test_moonraker_discovery.cpp

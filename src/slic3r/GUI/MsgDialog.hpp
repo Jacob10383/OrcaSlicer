@@ -62,7 +62,7 @@ public:
 
 WX_DECLARE_HASH_MAP(wxString, MsgButton *, wxStringHash, wxStringEqual, MsgButtonsHash);
 
-// A message / query dialog with a bitmap on the left and any content on the right
+// A message / query dialog with an optional bitmap on the left and content on the right
 // with buttons underneath.
 struct MsgDialog : DPIDialog
 {
@@ -92,7 +92,7 @@ protected:
 		VERT_SPACING = 15,//TO
 	};
 
-	MsgDialog(wxWindow *parent, const wxString &title, const wxString &headline, long style = wxOK, wxBitmap bitmap = wxNullBitmap, const wxString &forward_str = "");
+	MsgDialog(wxWindow *parent, const wxString &title, const wxString &headline, long style = wxOK, wxBitmap bitmap = wxNullBitmap, const wxString &forward_str = "", bool show_logo = true);
 	// returns pointer to created button
 	Button* add_button(wxWindowID btn_id, bool set_focus = false, const wxString& label = wxString());
 	// returns pointer to found button or NULL
@@ -104,7 +104,7 @@ protected:
 	wxBoxSizer *content_sizer;
 	wxBoxSizer *btn_sizer;
 	wxBoxSizer *m_dsa_sizer;
-	wxStaticBitmap *logo;
+	wxStaticBitmap *logo{nullptr};
     MsgButtonsHash  m_buttons;
 	CheckBox* m_checkbox_dsa{nullptr};
     wxString  m_forward_str;
