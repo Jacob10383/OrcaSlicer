@@ -1118,7 +1118,8 @@ bool MoonrakerPrinterAgent::init_device_info(const std::string& dev_id, const st
     const auto& printer_cfg = preset.config;
 
     device_info.dev_ip     = dev_ip;
-    device_info.api_key    = password;
+    // Orca stores "88888888" when no API key is set; sending it makes Moonraker reject trusted clients.
+    device_info.api_key    = password == "88888888" ? std::string() : password;
     device_info.model_name = printer_cfg.opt_string("printer_model");
     device_info.model_id   = preset.get_printer_type(preset_bundle);
     device_info.base_url   = normalize_base_url(use_ssl, dev_ip, port);
