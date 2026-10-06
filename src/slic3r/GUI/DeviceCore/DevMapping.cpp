@@ -21,7 +21,6 @@
 // TODO: remove this include
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
-#include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/GuiColor.hpp"
 
 using namespace nlohmann;

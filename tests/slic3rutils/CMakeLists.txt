@@ -2,6 +2,7 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     test_bambu_filament_ids.cpp
+    test_config_value_formatter.cpp
     test_creality_cfs_match.cpp
     test_box_filament_sync.cpp
     test_box_print_mapping.cpp
@@ -40,6 +41,10 @@ add_executable(${_TEST_NAME}_tests
     test_user_manager.cpp
     ../fff_print/test_helpers.cpp
     )
+
+if (SLIC3R_CAD)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_design_sketch_tool.cpp)
+endif ()
 
 if (MSVC)
     target_link_libraries(${_TEST_NAME}_tests Setupapi.lib)
