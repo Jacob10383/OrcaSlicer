@@ -68,7 +68,7 @@ If you come across any of these in search results, please <b>report them</b> as 
   Regular updates fueled by continuous community contributions.
 - **Wide Printer Compatibility**  
   Supports a broad range of printers: Bambu Lab, Prusa, Creality, Voron, and more.
-- Additional features can be found in the [change notes](https://github.com/OrcaSlicer/OrcaSlicer/releases/).
+- Additional features can be found in the [change notes](https://github.com/Jacob10383/OrcaSlicer/releases/).
 
 # Wiki
 
@@ -79,59 +79,30 @@ The [wiki](https://www.orcaslicer.com/wiki) aims to provide a detailed explanati
 
 # Download
 
-## Stable Release
+🌙 **[Download the Latest Fork Build](https://github.com/Jacob10383/OrcaSlicer/releases/tag/Nightly-Rolling)**
 
-📥 **[Download the Latest Stable Release](https://github.com/OrcaSlicer/OrcaSlicer/releases/latest)**  
-Visit our GitHub Releases page for the latest stable version of OrcaSlicer, recommended for most users.
-
-## Nightly Builds
-
-🌙 **[Download the Latest Nightly Build](https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/nightly-builds)**  
-Explore the latest developments in OrcaSlicer with our nightly builds. Feedback on these versions is highly appreciated.
-
-### Belt Printer Builds
-
-The [nightly release](https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/nightly-builds) ships **two parallel builds**: the standard build and a belt-printer build. Both are attached to the same release — tell them apart by the filename suffix:
-
-- **Standard** — no suffix (e.g. `OrcaSlicer_Windows_Installer_x64_nightly.exe`)
-- **Belt** — `_belt` suffix (e.g. `OrcaSlicer_Windows_Installer_x64_nightly_belt.exe`)
-
-The `_belt` builds add **experimental support for belt / conveyor (infinite-Z) printers**, where the model is sliced against a tilted belt surface instead of a flat horizontal bed. They include ready-to-use belt printer profiles, the full belt slicing pipeline (mesh rotation and G-code transforms), belt-aware support generation, and a tilted-bed preview.
-
-> ⚠️ Belt printer support is under active development and is **not yet merged into `main`** — it currently ships only in these parallel `_belt` builds, produced from the [`belt-printer`](https://github.com/OrcaSlicer/OrcaSlicer/tree/belt-printer) branch. See tracking PR [#14394](https://github.com/OrcaSlicer/OrcaSlicer/pull/14394) and the original documentation in [#12998](https://github.com/OrcaSlicer/OrcaSlicer/pull/12998).
+This fork's builds are published to the rolling `Nightly-Rolling` release. Download the installer or package for your platform below, or visit the [releases page](https://github.com/Jacob10383/OrcaSlicer/releases) for all assets.
 
 # How to install
 
 ## Windows
 
-Download the **Windows Installer exe** for your preferred version from the [releases page](https://github.com/OrcaSlicer/OrcaSlicer/releases). Both `x64` and `arm64` installers are published — pick the one matching your CPU.
+Download the **Windows Installer exe** for your CPU: [x64](https://github.com/Jacob10383/OrcaSlicer/releases/download/Nightly-Rolling/OrcaSlicer_Windows_Installer_x64_nightly.exe) or [ARM64](https://github.com/Jacob10383/OrcaSlicer/releases/download/Nightly-Rolling/OrcaSlicer_Windows_Installer_arm64_nightly.exe).
 
-- *For convenience there is also a portable build available.*
+- *Portable builds are also available on the [releases page](https://github.com/Jacob10383/OrcaSlicer/releases/tag/Nightly-Rolling).*
     <details>
     <summary>Troubleshooting</summary>
 
   - *If you have troubles to run the build, you might need to install following runtimes:*
-  - [MicrosoftEdgeWebView2RuntimeInstallerX64](https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v1.0.10-sf2/MicrosoftEdgeWebView2RuntimeInstallerX64.exe)
+  - [MicrosoftEdgeWebView2RuntimeInstallerX64](https://go.microsoft.com/fwlink/p/?LinkId=2124703)
     - [Details of this runtime](https://aka.ms/webview2)
-    - [Alternative Download Link Hosted by Microsoft](https://go.microsoft.com/fwlink/p/?LinkId=2124703)
-  - [vcredist2019_x64](https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v1.0.10-sf2/vcredist2019_x64.exe)
-    - [Alternative Download Link Hosted by Microsoft](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+  - [Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)
     - This file may already be available on your computer if you've installed visual studio.  Check the following location: `%VCINSTALLDIR%Redist\MSVC\v142`
     </details>
 
-### Microsoft Store
-
-Install from the [Microsoft Store](https://apps.microsoft.com/detail/9mv6gl23xm59) when you prefer a Store-signed package (helps on Windows 11 Smart App Control).
-
-### Windows Package Manager
-
-```shell
-winget install --id=SoftFever.OrcaSlicer -e
-```
-
 ## Mac
 
-1. Download the universal DMG, which runs on both Apple Silicon and Intel Macs.
+1. Download the [universal DMG](https://github.com/Jacob10383/OrcaSlicer/releases/download/Nightly-Rolling/OrcaSlicer_Mac_universal_nightly.dmg), which runs on both Apple Silicon and Intel Macs.
 2. Drag OrcaSlicer.app to Application folder.
 3. *If you want to run a build from a PR, you also need to follow the instructions below:*
 
@@ -156,36 +127,24 @@ winget install --id=SoftFever.OrcaSlicer -e
             ![mac_security_setting](./SoftFever_doc/mac_security_setting.png)
     </details>
 
-### Homebrew Cask
-
-```shell
-brew install --cask orcaslicer
-```
-
-The [Homebrew cask](https://formulae.brew.sh/cask/orcaslicer) installs the official macOS DMG from [GitHub Releases](https://github.com/OrcaSlicer/OrcaSlicer/releases).
-
 ## Linux
 
-### Flathub (Recommended)
+### Flatpak
 
-OrcaSlicer is available through FlatHub:
+Download this fork's Flatpak bundle for your CPU: [x86_64](https://github.com/Jacob10383/OrcaSlicer/releases/download/Nightly-Rolling/OrcaSlicer-Linux-flatpak_nightly_x86_64.flatpak) or [aarch64 (ARM64)](https://github.com/Jacob10383/OrcaSlicer/releases/download/Nightly-Rolling/OrcaSlicer-Linux-flatpak_nightly_aarch64.flatpak).
 
-<a href='https://flathub.org/apps/com.orcaslicer.OrcaSlicer'><img width='240' alt='Download on Flathub' src='https://dl.flathub.org/assets/badges/flathub-badge-en.png'/></a>
-
-Install from the command line:
+Install the downloaded bundle from the command line (replace the filename for ARM64):
 
 ```shell
-flatpak install flathub com.orcaslicer.OrcaSlicer
+flatpak install --user ./OrcaSlicer-Linux-flatpak_nightly_x86_64.flatpak
 flatpak run com.orcaslicer.OrcaSlicer
 ```
-
-It can also be installed through graphical software managers (KDE Discover, GNOME Software, etc.) when Flathub is enabled. Search for **OrcaSlicer** in your software center.
 
 ### AppImage
 
 AppImages are published for both **x86_64** and **aarch64** (ARM64). Pick the file matching your CPU — the ARM64 build has `aarch64` in its name (e.g. `OrcaSlicer_Linux_AppImage_Ubuntu2404_aarch64_*.AppImage`).
 
- 1. Download App image from the [releases page](https://github.com/OrcaSlicer/OrcaSlicer/releases).
+ 1. Download the AppImage for your CPU: [x86_64](https://github.com/Jacob10383/OrcaSlicer/releases/download/Nightly-Rolling/OrcaSlicer_Linux_AppImage_Ubuntu2404_nightly.AppImage) or [aarch64 (ARM64)](https://github.com/Jacob10383/OrcaSlicer/releases/download/Nightly-Rolling/OrcaSlicer_Linux_AppImage_Ubuntu2404_aarch64_nightly.AppImage).
  2. Double click the downloaded file to run it.
 
  3. If you run into trouble executing it, try this command in the terminal:
