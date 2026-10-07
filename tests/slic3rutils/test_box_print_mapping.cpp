@@ -8,6 +8,8 @@
 #include <thread>
 #include <tuple>
 
+#include "libslic3r/Config.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "slic3r/Utils/BoxPrintMapping.hpp"
 #include "slic3r/Utils/Moonraker.hpp"
 #include "test_utils.hpp"
