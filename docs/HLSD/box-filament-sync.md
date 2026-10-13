@@ -71,6 +71,12 @@ Box validates the current slots and file, installs the mapping, and starts the
 print. A rejected mapping never falls back to an ordinary print. G-code is not
 rewritten.
 
+Without a map, the upload asks Moonraker to print it (`print=true`), so Moonraker
+can start or queue the job itself. Only when the reply reports neither
+`print_started` nor `print_queued` does Orca start it, after rechecking that the
+printer lacks Box mapping support. A mapped upload never requests automatic
+printing, since Moonraker would start the file before Box installs the map.
+
 The transport uses upstream Moonraker's object-query and G-code-script endpoints.
 It does not use the stock Creality mapping protocol or the AMS tray adapter,
 which does not retain Box's external-holder distinction.

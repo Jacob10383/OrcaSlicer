@@ -23,7 +23,8 @@ class Http;
 //
 // Endpoints used:
 //   GET  /server/info                      -- connection test, reads klippy_state
-//   POST /server/files/upload (multipart)  -- upload gcode (form fields: file, root, plateindex)
+//   POST /server/files/upload (multipart)  -- upload gcode (form fields: file, root, print,
+//                                             plateindex)
 //   POST /printer/print/start (json)       -- ordinary printing
 //   GET  /printer/objects/query?box        -- Box mapping capability and slots
 //   POST /printer/gcode/script (json)      -- BOX_PRINT_INFO / BOX_PRINT_START

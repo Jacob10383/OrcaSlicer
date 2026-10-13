@@ -188,10 +188,16 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
     //ORCA: POST /server/files/upload as multipart/form-data with:
     //          file = <gcode file>
     //          root = <storage root>     (Moonraker default: "gcodes")
+    //          print = true|false
     //      The reply is a bare object (no {"result": ...} envelope):
-    //          { "item": { "path": "<name>.gcode", "root": "<root>" }, "print_started": <bool> }
-    //      Upload never requests automatic printing. Start separately so Box can
-    //      verify the uploaded file and install its selected map before execution.
+    //          { "item": { "path": "<name>.gcode", "root": "<root>" }, "print_started": <bool>, "print_queued": <bool> }
+    //      Without a Box mapping, `print=true` lets Moonraker start the print itself (issue #14945):
+    //      print_started when it began immediately, print_queued when it put the job in its queue
+    //      (Klippy not ready, or another print running; [file_manager] queue_gcode_uploads). Either
+    //      flag means Moonraker owns the print and we must not start it again. When both are false
+    //      (no job queue, or a server that ignores `print`) we fall back to the explicit start below.
+    //      A Box mapping never requests automatic printing: Box must verify the uploaded file and
+    //      install its selected map before execution.
     wxString test_msg;
     if (!test(test_msg)) {
         error_fn(std::move(test_msg));
@@ -219,11 +225,13 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
     std::string uploaded_root = root;
     bool uploaded_path_confirmed = false;
     const std::string box_mapping = upload_data.extended("box_mapping");
+    const bool moonraker_start = start_print && box_mapping.empty();
+    bool moonraker_started_print = false;
     size_t uploaded_bytes = 0;
     const auto report_progress = [&](Http::Progress progress, bool& cancel) {
-        // The queue marks 100% complete and disables cancellation. Keep it
-        // pending until file inspection and the print-start request finish.
-        if (start_print && progress.ultotal > 0 && progress.ulnow >= progress.ultotal)
+        // The queue marks 100% complete and disables cancellation. Keep a Box
+        // print pending until file inspection and the print-start request finish.
+        if (start_print && !moonraker_start && progress.ultotal > 0 && progress.ulnow >= progress.ultotal)
             progress.ulnow = progress.ultotal - 1;
         progress_fn(std::move(progress), cancel);
     };
@@ -247,6 +255,7 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
     http.form_add("root", root);
     if (!plateindex.empty())
         http.form_add("plateindex", plateindex);
+    http.form_add("print", moonraker_start ? "true" : "false");
     http.form_add_file("file", upload_data.source_path.string(), upload_filename.string())
         .on_complete([&](std::string body, unsigned status) {
             BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: upload HTTP %2%: %3%") % name % status % body;
@@ -271,6 +280,8 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
                         "%1%: upload response missing item.path, falling back to original filename `%2%`")
                         % name % uploaded_path;
                 }
+                moonraker_started_print = moonraker_start && (ptree.get<bool>("print_started", false) ||
+                                                              ptree.get<bool>("print_queued", false));
             } catch (const std::exception &ex) {
                 BOOST_LOG_TRIVIAL(warning) << boost::format(
                     "%1%: could not parse upload response (%2%); falling back to original filename")
@@ -300,7 +311,7 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
     if (!result)
         return false;
 
-    if (start_print) {
+    if (start_print && !moonraker_started_print) {
         if (!box_mapping.empty() && !uploaded_path_confirmed) {
             error_fn(wxString::FromUTF8("Moonraker did not confirm the uploaded filename. The Box print was not started."));
             return false;

@@ -478,6 +478,46 @@ TEST_CASE("Legacy Moonraker maps the actual server stored filename after upload"
           "BOX_PRINT_START FILENAME=\"nested/renamed.gcode\" MAP=\"1:8,5:12\"");
 }
 
+TEST_CASE("Legacy printing without a Box mapping lets Moonraker start the upload", "[BoxPrintMapping]")
+{
+    const std::string flag = GENERATE(std::string("print_started"), std::string("print_queued"));
+    PrintServer server({{200, R"({"result":{"klippy_state":"ready"}})"},
+                        {201, json{{"item", {{"path", "stored.gcode"}, {"root", "gcodes"}}}, {"action", "create_file"},
+                                   {"print_started", flag == "print_started"}, {"print_queued", flag == "print_queued"}}.dump()}});
+    std::string error;
+    REQUIRE(legacy_upload(server, PrintHostPostUploadAction::StartPrint, "", error));
+    server.finish();
+    REQUIRE(server.requests.size() == 2);
+    CHECK(server.requests[1].find("name=\"print\"\r\n\r\ntrue") != std::string::npos);
+}
+
+TEST_CASE("Legacy printing falls back to an explicit start when Moonraker does not start the upload", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, R"({"result":{"klippy_state":"ready"}})"},
+                        {201, R"({"item":{"path":"stored.gcode","root":"gcodes"},"print_started":false,"print_queued":false})"},
+                        {200, R"({"result":{"status":{}}})"}, {200, ok}});
+    std::string error;
+    REQUIRE(legacy_upload(server, PrintHostPostUploadAction::StartPrint, "", error));
+    server.finish();
+    REQUIRE(server.requests.size() == 4);
+    CHECK(server.requests[3].find("POST /moonraker/printer/print/start HTTP/") == 0);
+    CHECK(request_body(server.requests[3])["filename"] == "stored.gcode");
+}
+
+TEST_CASE("Legacy mapped printing never asks Moonraker to start the upload", "[BoxPrintMapping]")
+{
+    // A server claiming it queued the print is ignored: the file still goes through Box.
+    PrintServer server({{200, R"({"result":{"klippy_state":"ready"}})"},
+                        {201, R"({"item":{"path":"stored.gcode","root":"gcodes"},"print_started":false,"print_queued":true})"},
+                        {200, box_response().dump()}, {200, ok}, {200, print_info("stored.gcode").dump()}, {200, ok}});
+    std::string error;
+    REQUIRE(legacy_upload(server, PrintHostPostUploadAction::StartPrint, R"({"1":8,"5":12})", error));
+    server.finish();
+    REQUIRE(server.requests.size() == 6);
+    CHECK(server.requests[1].find("name=\"print\"\r\n\r\nfalse") != std::string::npos);
+    CHECK(request_body(server.requests[5])["script"] == "BOX_PRINT_START FILENAME=\"stored.gcode\" MAP=\"1:8,5:12\"");
+}
+
 TEST_CASE("Legacy mapped printing requires the upload response to confirm the filename", "[BoxPrintMapping]")
 {
     PrintServer server({{200, R"({"result":{"klippy_state":"ready"}})"}, {200, ok}});
