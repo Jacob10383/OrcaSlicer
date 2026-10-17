@@ -278,8 +278,16 @@ TEST_CASE("Box mapping rejects invalid serialized selections", "[BoxPrintMapping
 
 TEST_CASE("Box mapped printing inspects the stored filename before starting its exact map", "[BoxPrintMapping]")
 {
+    auto status = box_response();
+    auto& box = status["result"]["status"]["box"];
+    const int revision = GENERATE(0, 2, 3);
+    if (revision != 0) {
+        box.erase("print_mapping_version");
+        box["api_version"] = 1;
+        box["api_revision"] = revision;
+    }
     const std::string filename = "nested/renamed \"quoted\" \\ part.gcode";
-    PrintServer server({{200, box_response().dump()}, {200, ok}, {200, print_info(filename).dump()}, {200, ok}});
+    PrintServer server({{200, status.dump()}, {200, ok}, {200, print_info(filename).dump()}, {200, ok}});
     std::string error;
     REQUIRE(start_box_print(*host(server, "secret"), filename, R"({"1":8,"5":12})", error));
     server.finish();
@@ -288,6 +296,70 @@ TEST_CASE("Box mapped printing inspects the stored filename before starting its 
     CHECK(request_body(server.requests[1])["script"] == "BOX_PRINT_INFO FILENAME=\"nested/renamed \\\"quoted\\\" \\\\ part.gcode\"");
     CHECK(server.requests[2].find("GET /moonraker/printer/objects/query?box=print_info HTTP/") == 0);
     CHECK(request_body(server.requests[3])["script"] == "BOX_PRINT_START FILENAME=\"nested/renamed \\\"quoted\\\" \\\\ part.gcode\" MAP=\"1:8,5:12\"");
+}
+
+TEST_CASE("Box mapping accepts either supported capability advertisement", "[BoxPrintMapping]")
+{
+    auto response = box_response();
+    auto& box = response["result"]["status"]["box"];
+    const bool legacy = GENERATE(false, true);
+    box["print_mapping_version"] = legacy ? 1 : 2;
+    box["api_version"] = legacy ? 2 : 1;
+    box["api_revision"] = 2;
+    PrintServer server({{200, response.dump()}});
+    BoxPrintStatus status;
+    std::string error;
+    REQUIRE(fetch_box_print_status(*host(server), status, error));
+    server.finish();
+    CHECK(status.supported);
+    CHECK(status.slots.size() == 3);
+}
+
+TEST_CASE("Box mapping requires a supported status API version and integer revision", "[BoxPrintMapping]")
+{
+    auto response = box_response();
+    auto& box = response["result"]["status"]["box"];
+    box.erase("print_mapping_version");
+    const auto version = GENERATE(std::string(R"({})"),
+        std::string(R"({"api_version":1,"api_revision":1})"),
+        std::string(R"({"api_version":2,"api_revision":2})"),
+        std::string(R"({"api_version":1})"), std::string(R"({"api_revision":2})"),
+        std::string(R"({"api_version":"1","api_revision":2})"),
+        std::string(R"({"api_version":1,"api_revision":"2"})"),
+        std::string(R"({"api_version":1,"api_revision":2.0})"),
+        std::string(R"({"api_version":true,"api_revision":2})"),
+        std::string(R"({"api_version":1,"api_revision":true})"));
+    box.update(json::parse(version));
+    PrintServer server({{200, response.dump()}});
+    BoxPrintStatus status;
+    std::string error;
+    REQUIRE(fetch_box_print_status(*host(server), status, error));
+    server.finish();
+    CHECK_FALSE(status.supported);
+    CHECK(status.slots.empty());
+    CHECK(error.empty());
+}
+
+TEST_CASE("Revision two Box mapping still requires ready valid slots", "[BoxPrintMapping]")
+{
+    auto response = box_response();
+    auto& box = response["result"]["status"]["box"];
+    box.erase("print_mapping_version");
+    box["api_version"] = 1;
+    box["api_revision"] = 2;
+    const int invalid = GENERATE(0, 1, 2);
+    if (invalid == 0)
+        box["data_ready"] = false;
+    else if (invalid == 1)
+        box["driver_ready"] = false;
+    else
+        box["slots"] = json::array();
+    PrintServer server({{200, response.dump()}});
+    std::string error;
+    CHECK_FALSE(start_box_print(*host(server), "stored.gcode", R"({"1":8,"5":12})", error));
+    server.finish();
+    CHECK(server.requests.size() == 1);
+    CHECK_FALSE(error.empty());
 }
 
 TEST_CASE("Box print refuses changed or invalid file metadata without ordinary fallback", "[BoxPrintMapping]")

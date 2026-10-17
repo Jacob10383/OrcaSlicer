@@ -112,12 +112,16 @@ bool parse_status(const json& response, BoxPrintStatus& status, std::string& err
         const auto& box = objects.at("box");
         if (!box.is_object())
             throw std::runtime_error("Invalid Box status.");
-        if (!box.contains("print_mapping_version"))
-            return true;
-        const auto& version = box.at("print_mapping_version");
-        if (!version.is_number_integer())
+        const auto version = box.find("print_mapping_version");
+        if (version != box.end() && !version->is_number_integer())
             throw std::runtime_error("Invalid Box print mapping version.");
-        if (version != 1)
+        const auto api_version = box.find("api_version");
+        const auto api_revision = box.find("api_revision");
+        const bool legacy_mapping = version != box.end() && *version == 1;
+        // Status API v1 revision 2 includes print mapping in the shared contract.
+        const bool api_mapping = api_version != box.end() && api_version->is_number_integer() && *api_version == 1 &&
+                                 api_revision != box.end() && api_revision->is_number_integer() && *api_revision >= 2;
+        if (!legacy_mapping && !api_mapping)
             return true;
         status.supported = true;
         if (box.at("data_ready") != true || box.at("driver_ready") != true)

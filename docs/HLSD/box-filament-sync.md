@@ -37,8 +37,9 @@ A successful direct query returns before stock model detection or port 9999.
 
 ## Print slot mapping
 
-Moonraker printers advertising `box.print_mapping_version == 1` offer slot
-mapping in the legacy `PrintHostSendDialog` when uploading the current sliced
+Moonraker printers advertising `box.print_mapping_version == 1`, or
+`box.api_version == 1` with `box.api_revision >= 2`, offer slot mapping in the
+legacy `PrintHostSendDialog` when uploading the current sliced
 plate as G-code. The printer-agent print path does not handle Box print mapping.
 Upload-only ignores the selections and remains available when mapping is
 incomplete.
