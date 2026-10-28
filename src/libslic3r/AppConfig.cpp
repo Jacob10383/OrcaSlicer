@@ -58,7 +58,8 @@ using namespace nlohmann;
 
 namespace Slic3r {
 
-static const std::string VERSION_CHECK_URL = "https://check-version.orcaslicer.com/latest";
+// Fork: check this fork's GitHub releases, not upstream's update server.
+static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/Jacob10383/OrcaSlicer/releases";
 static const std::string PROFILE_UPDATE_URL = "https://check-version.orcaslicer.com/profile";
 
 constexpr const char* CONFIG_ORCA_UPDATER_URL = "orca_updater_url";
