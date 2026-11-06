@@ -17,6 +17,8 @@ namespace {
 using nlohmann::json;
 
 const char* const STATUS_QUERY = "printer/objects/query?box";
+const char* const SOAK_MACRO = "gcode_macro _START_PRINT_VARS";
+const char* const SOAK_QUERY = "printer/objects/query?gcode_macro%20_START_PRINT_VARS=heat_soak,soak_once";
 
 struct Response
 {
@@ -88,8 +90,20 @@ bool script(const Moonraker& host, const std::string& script, std::string& error
     return request(host, "printer/gcode/script", &body, response, error);
 }
 
-bool ordinary_start(const Moonraker& host, const std::string& filename, std::string& error)
+// Appended to a start script. A failed start stops the script before this line,
+// and Virtual SD waits for the script to finish before reading the file.
+std::string soak_line(std::optional<int> soak_minutes)
 {
+    return soak_minutes ? "\nSET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=" +
+                              std::to_string(*soak_minutes) :
+                          std::string();
+}
+
+bool ordinary_start(const Moonraker& host, const std::string& filename, const std::string& quoted_filename,
+                    std::optional<int> soak_minutes, std::string& error)
+{
+    if (soak_minutes)
+        return script(host, "SDCARD_PRINT_FILE FILENAME=" + quoted_filename + soak_line(soak_minutes), error);
     const json body = {{"filename", filename}};
     json response;
     return request(host, "printer/print/start", &body, response, error);
@@ -289,6 +303,27 @@ void fetch_box_print_status_async(const Moonraker& host, BoxPrintStatusFn done)
     http.perform();
 }
 
+void fetch_heat_soak_status_async(const Moonraker& host, std::function<void(const HeatSoakStatus&)> done)
+{
+    auto http = make_request(host, SOAK_QUERY, nullptr, true);
+    on_response(http, [done](const Response& response) {
+        HeatSoakStatus status;
+        try {
+            const auto& vars = response.body.at("result").at("status").at(SOAK_MACRO);
+            const auto& minutes = vars.at("heat_soak");
+            if (response.success && vars.contains("soak_once") && minutes.is_number() && minutes >= 0 &&
+                minutes <= MAX_HEAT_SOAK_MINUTES) {
+                status.supported = true;
+                status.minutes = static_cast<int>(std::lround(minutes.get<double>()));
+            }
+        } catch (const json::exception&) {
+            // An older config or a non-K2 printer: no heat soak field.
+        }
+        done(status);
+    });
+    http.perform();
+}
+
 BoxPrintMapping suggest_box_print_mapping(const std::vector<BoxPrintTool>& tools,
                                           const std::vector<BoxFilamentSlot>& slots)
 {
@@ -325,6 +360,11 @@ BoxPrintMapping suggest_box_print_mapping(const std::vector<BoxPrintTool>& tools
             std::any_of(slots.begin(), slots.end(), [&](const auto& slot) { return slot.index == tool.id; }))
             mapping.emplace(tool.id, tool.id);
     return mapping;
+}
+
+bool box_materials_conflict(const std::string& a, const std::string& b)
+{
+    return material_cost(a, b) < 0.;
 }
 
 std::string serialize_box_print_mapping(const BoxPrintMapping& mapping)
@@ -364,7 +404,7 @@ bool parse_box_print_mapping(const std::string& serialized, BoxPrintMapping& map
 
 bool start_box_print(const Moonraker& host, const std::string& filename, const std::string& serialized_mapping,
                      std::string& error, const std::function<bool()>& cancelled,
-                     const std::function<bool()>& starting)
+                     const std::function<bool()>& starting, std::optional<int> soak_minutes)
 {
     error.clear();
     auto is_cancelled = [&] {
@@ -403,7 +443,7 @@ bool start_box_print(const Moonraker& host, const std::string& filename, const s
             error = "This printer no longer supports the selected Box print mapping.";
             return false;
         }
-        return !start_cancelled() && ordinary_start(host, filename, error);
+        return !start_cancelled() && ordinary_start(host, filename, quoted_filename, soak_minutes, error);
     }
     if (!script(host, "BOX_PRINT_INFO FILENAME=" + quoted_filename, error) || is_cancelled())
         return false;
@@ -418,7 +458,7 @@ bool start_box_print(const Moonraker& host, const std::string& filename, const s
         if (!tools.is_array())
             throw std::runtime_error("Invalid Box file tools.");
         if (tools.empty() && !selected)
-            return !start_cancelled() && ordinary_start(host, filename, error);
+            return !start_cancelled() && ordinary_start(host, filename, quoted_filename, soak_minutes, error);
         std::set<int> used;
         for (const auto& tool : tools) {
             if (!valid_index(tool.at("tool"), 255) || !used.insert(tool.at("tool").get<int>()).second)
@@ -435,7 +475,8 @@ bool start_box_print(const Moonraker& host, const std::string& filename, const s
         }
         if (start_cancelled())
             return false;
-        return script(host, "BOX_PRINT_START FILENAME=" + quoted_filename + " MAP=\"" + map + "\"", error);
+        return script(host, "BOX_PRINT_START FILENAME=" + quoted_filename + " MAP=\"" + map + "\"" + soak_line(soak_minutes),
+                      error);
     } catch (const std::exception& ex) {
         error = std::string("Cannot start Box print: ") + ex.what();
         return false;

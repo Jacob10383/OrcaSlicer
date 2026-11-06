@@ -78,6 +78,18 @@ can start or queue the job itself. Only when the reply reports neither
 printer lacks Box mapping support. A mapped upload never requests automatic
 printing, since Moonraker would start the file before Box installs the map.
 
+Upload and Print also offers a heat soak time when the printer's
+`_START_PRINT_VARS` macro reports `soak_once`, starting from its `heat_soak`
+setting. Like Fluidd, it offers up to 240 minutes, and is not offered when that
+setting is longer. The printer's setting decides unless the user changes the value. A
+changed value is not written into the G-code: it goes in the start request,
+as a `SET_GCODE_VARIABLE ... VARIABLE=soak_once` line after `BOX_PRINT_START`
+or `SDCARD_PRINT_FILE`, and `START_PRINT` uses it once. Klipper runs a G-code
+script under one lock and stops it at the first error, and Virtual SD waits for
+that lock, so the value is set only when the start succeeds and before the
+file's first line. Such an upload never requests automatic printing, for the
+same reason as a mapped one.
+
 The transport uses upstream Moonraker's object-query and G-code-script endpoints.
 It does not use the stock Creality mapping protocol or the AMS tray adapter,
 which does not retain Box's external-holder distinction.

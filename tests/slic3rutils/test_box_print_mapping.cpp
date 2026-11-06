@@ -124,7 +124,8 @@ std::unique_ptr<Moonraker> host(const PrintServer& server, const std::string& ap
     return host(server.url(), api_key);
 }
 bool legacy_upload(PrintServer& server, PrintHostPostUploadAction action, const std::string& mapping, std::string& error,
-                   const PrintHost::ProgressFn& progress = {}, const std::string& storage = {})
+                   const PrintHost::ProgressFn& progress = {}, const std::string& storage = {},
+                   const std::string& soak = {})
 {
     ScopedTemporaryFile source(".gcode");
     {
@@ -138,6 +139,8 @@ bool legacy_upload(PrintServer& server, PrintHostPostUploadAction action, const 
     upload.post_action = action;
     upload.storage = storage;
     upload.extended_info["box_mapping"] = mapping;
+    if (!soak.empty())
+        upload.extended_info["heat_soak"] = soak;
     return moonraker->upload(std::move(upload), [&](Http::Progress p, bool& cancel) { if (progress) progress(p, cancel); },
                        [&](wxString message) { error = message.ToUTF8().data(); }, [](wxString, wxString) {});
 }
@@ -681,4 +684,97 @@ TEST_CASE("Legacy mapped printing reports firmware rejection when a selected slo
     CHECK(request_body(server.requests.back())["script"] ==
           "BOX_PRINT_START FILENAME=\"stored.gcode\" MAP=\"1:8,5:12\"");
     CHECK(error.find("[BOX]: Slot T8 has no filament") != std::string::npos);
+}
+
+namespace {
+HeatSoakStatus heat_soak_status(PrintServer& server)
+{
+    std::promise<HeatSoakStatus> result;
+    fetch_heat_soak_status_async(*host(server), [&](const HeatSoakStatus& status) { result.set_value(status); });
+    auto future = result.get_future();
+    REQUIRE(future.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    server.finish();
+    return future.get();
+}
+
+json soak_vars(json vars)
+{
+    return {{"result", {{"status", {{"gcode_macro _START_PRINT_VARS", std::move(vars)}}}}}};
+}
+} // namespace
+
+TEST_CASE("Heat soak is offered with the printer's setting when START_PRINT takes a one-time soak", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, soak_vars(json::object({{"heat_soak", 7.6}, {"soak_once", -1}})).dump()}});
+    const auto status = heat_soak_status(server);
+    CHECK(status.supported);
+    CHECK(status.minutes == 8);
+    REQUIRE(server.requests.size() == 1);
+    CHECK(server.requests.front().find(
+              "GET /moonraker/printer/objects/query?gcode_macro%20_START_PRINT_VARS=heat_soak,soak_once HTTP/") == 0);
+}
+
+TEST_CASE("Heat soak is hidden for older configs, other printers and failed queries", "[BoxPrintMapping]")
+{
+    const auto reply = GENERATE(PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", 5}})).dump()},
+                                PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", "5"}, {"soak_once", -1}})).dump()},
+                                PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", -1}, {"soak_once", -1}})).dump()},
+                                // Longer than the dialog offers: left to the printer's setting.
+                                PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", MAX_HEAT_SOAK_MINUTES + 1},
+                                                                                {"soak_once", -1}})).dump()},
+                                PrintServer::Reply{200, R"({"result":{"status":{}}})"},
+                                PrintServer::Reply{200, R"({"result":[]})"},
+                                PrintServer::Reply{200, "not JSON"},
+                                PrintServer::Reply{404, R"({"error":{"message":"x"}})"});
+    PrintServer server({reply});
+    CHECK_FALSE(heat_soak_status(server).supported);
+}
+
+TEST_CASE("A chosen heat soak is set in the same request as a Box start", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, box_response().dump()}, {200, ok}, {200, print_info("stored.gcode").dump()}, {200, ok}});
+    std::string error;
+    REQUIRE(start_box_print(*host(server), "stored.gcode", R"({"1":8,"5":12})", error, {}, {}, 0));
+    server.finish();
+    REQUIRE(server.requests.size() == 4);
+    CHECK(request_body(server.requests[3])["script"] ==
+          "BOX_PRINT_START FILENAME=\"stored.gcode\" MAP=\"1:8,5:12\"\n"
+          "SET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=0");
+}
+
+TEST_CASE("A chosen heat soak replaces Moonraker's start with one start script", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, R"({"result":{"status":{}}})"}, {200, ok}});
+    std::string error;
+    REQUIRE(start_box_print(*host(server), "a \"b\".gcode", "", error, {}, {}, 12));
+    server.finish();
+    REQUIRE(server.requests.size() == 2);
+    CHECK(server.requests[1].find("POST /moonraker/printer/gcode/script HTTP/") == 0);
+    CHECK(request_body(server.requests[1])["script"] ==
+          "SDCARD_PRINT_FILE FILENAME=\"a \\\"b\\\".gcode\"\n"
+          "SET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=12");
+}
+
+TEST_CASE("Upload and Print with a chosen heat soak starts the stored file itself", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, R"({"result":{"klippy_state":"ready"}})"},
+                        {201, json{{"item", {{"path", "stored.gcode"}, {"root", "gcodes"}}}, {"action", "create_file"},
+                                   {"print_started", false}, {"print_queued", false}}.dump()},
+                        {200, R"({"result":{"status":{}}})"}, {200, ok}});
+    std::string error;
+    REQUIRE(legacy_upload(server, PrintHostPostUploadAction::StartPrint, "", error, {}, {}, "15"));
+    server.finish();
+    REQUIRE(server.requests.size() == 4);
+    CHECK(server.requests[1].find("name=\"print\"\r\n\r\nfalse") != std::string::npos);
+    CHECK(request_body(server.requests[3])["script"] ==
+          "SDCARD_PRINT_FILE FILENAME=\"stored.gcode\"\n"
+          "SET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=15");
+}
+
+TEST_CASE("Box material warnings flag only different material families", "[BoxPrintMapping]")
+{
+    CHECK(box_materials_conflict("PLA", "PA6-GF"));
+    CHECK_FALSE(box_materials_conflict("PLA", "PLA+"));
+    CHECK_FALSE(box_materials_conflict("pla", "PLA"));
+    CHECK_FALSE(box_materials_conflict("PLA", ""));
 }

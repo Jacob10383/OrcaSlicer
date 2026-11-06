@@ -2,6 +2,7 @@
 #define slic3r_PrintHostSendDialog_hpp_
 
 #include <map>
+#include <memory>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -26,9 +27,12 @@ class wxComboBox;
 class ComboBox;
 class wxDataViewListCtrl;
 class wxFlexGridSizer;
+class wxPanel;
 class wxStaticText;
 class wxWrapSizer;
 class CheckBox;
+class Button;
+class TextInput;
 
 namespace Slic3r { namespace GUI { class BitmapComboBox; } }
 
@@ -42,7 +46,7 @@ class PrintHostSendDialog : public GUI::MsgDialog
 {
 public:
     PrintHostSendDialog(const boost::filesystem::path &path, PrintHostPostUploadActions post_actions, const wxArrayString& groups, const wxArrayString& storage_paths, const wxArrayString& storage_names, bool switch_to_device_tab);
-    virtual ~PrintHostSendDialog() {}
+    ~PrintHostSendDialog() override { *m_alive = false; }
     boost::filesystem::path filename() const;
     PrintHostPostUploadAction post_action() const;
     std::string group() const;
@@ -51,6 +55,8 @@ public:
     // Shows the Box slot panel and checks printer support without blocking the dialog.
     void set_box_print_mapping(const Moonraker& host, const std::vector<BoxPrintTool>& tools,
                                const wxString& plate_error = {});
+    // Shows a heat soak field once the printer reports START_PRINT's one-time soak.
+    void set_heat_soak(const Moonraker& host);
 
     virtual void EndModal(int ret) override;
     virtual void init();
@@ -70,6 +76,16 @@ protected:
     PrintHostPostUploadActions m_post_actions;
     wxArrayString m_storage_names;
     BoxPrintMappingPanel* m_box_mapping = nullptr;
+    wxPanel* m_soak_row = nullptr;
+    ::TextInput* m_soak = nullptr;
+    ::Button* m_soak_less = nullptr;
+    ::Button* m_soak_more = nullptr;
+    // The printer's heat_soak, and the field's last valid value.
+    int m_soak_default = 0;
+    int m_soak_minutes = 0;
+    void set_soak_minutes(int minutes);
+    // Background lookups check this on the UI thread before touching the dialog.
+    std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
 };
 
 

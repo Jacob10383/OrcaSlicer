@@ -5,6 +5,8 @@
 #include <wx/panel.h>
 
 class ComboBox;
+class StaticBox;
+class wxSizer;
 class wxScrolledWindow;
 class wxStaticText;
 
@@ -14,6 +16,10 @@ namespace GUI {
 class PartPlate;
 
 wxDECLARE_EVENT(wxEVT_BOX_PRINT_MAPPING_CHANGED, wxCommandEvent);
+
+// An upper-case section heading over the print start rows, with an optional
+// right-aligned column heading.
+wxSizer* create_print_section_header(wxWindow* parent, const wxString& title, const wxString& column = {});
 
 // Keep the slice's logical tool IDs, including gaps, without changing presets.
 std::vector<BoxPrintTool> collect_box_print_tools(PartPlate* plate, const DynamicPrintConfig& sliced_config);
@@ -43,7 +49,8 @@ private:
     std::vector<BoxPrintTool> m_tools;
     std::vector<BoxFilamentSlot> m_slots;
     std::vector<ComboBox*> m_choices;
-    std::vector<wxStaticText*> m_warnings;
+    // One bordered row per tool; a material conflict colours its border and background.
+    std::vector<StaticBox*> m_rows;
     wxScrolledWindow* m_scroll;
     wxStaticText* m_notice = nullptr;
     bool m_error = false;

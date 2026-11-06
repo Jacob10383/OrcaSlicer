@@ -5,11 +5,14 @@
 #include "PartPlate.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/Label.hpp"
+#include "Widgets/StaticBox.hpp"
+#include "Widgets/StateColor.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <wx/dcmemory.h>
 #include <wx/scrolwin.h>
 #include <wx/sizer.h>
@@ -27,16 +30,47 @@ std::string config_string_at(const DynamicPrintConfig& config, const char* key, 
     return values && index < values->values.size() ? values->values[index] : std::string();
 }
 
+// The closed picker shows one line, so it names the slot and its material; the
+// menu item's tooltip carries the filament name.
 wxString slot_label(const BoxFilamentSlot& slot)
 {
     wxString label = slot.external ? _L("External spool") :
         wxString::Format(_L("Box %d, slot %d"), slot.index / 4 + 1, slot.index % 4 + 1);
-    const auto& description = slot.name.empty() ? slot.material : slot.name;
+    const auto& description = slot.material.empty() ? slot.name : slot.material;
     if (!description.empty())
         label += wxString::FromUTF8(" · ") + wxString::FromUTF8(description);
     return label;
 }
+
+// Orca names presets "<name> @<printer>", and copies get " - Copy" after that.
+wxString short_preset_name(const std::string& name)
+{
+    wxString result = wxString::FromUTF8(name.substr(0, name.find('@')));
+    result.Trim(true).Trim(false);
+    return result;
+}
+
+wxColour muted_text_colour() { return StateColor::darkModeColorFor(wxColour("#6B6B6B")); }
+// Light palette values; StateColor maps them for dark mode when it paints.
+constexpr unsigned long WARNING_RGB    = 0xB56A00;
+constexpr unsigned long WARNING_DARK   = 0xF0A040; // no dark mapping exists for the warning colour
+constexpr unsigned long ROW_BORDER_RGB = 0xDBDBDB;
+constexpr unsigned long LABEL_RGB      = 0x262E30;
 } // namespace
+
+wxSizer* create_print_section_header(wxWindow* parent, const wxString& title, const wxString& column)
+{
+    auto* row = new wxBoxSizer(wxHORIZONTAL);
+    for (const wxString* text : {&title, &column}) {
+        if (text->empty())
+            continue;
+        auto* label = new wxStaticText(parent, wxID_ANY, text->Upper());
+        label->SetFont(::Label::Body_12);
+        label->SetForegroundColour(muted_text_colour());
+        row->Add(label, text == &title ? 1 : 0, wxALIGN_CENTER_VERTICAL);
+    }
+    return row;
+}
 
 BoxPrintMappingPanel::BoxPrintMappingPanel(wxWindow* parent)
     : wxPanel(parent), m_scroll(new wxScrolledWindow(this, wxID_ANY))
@@ -88,14 +122,14 @@ void BoxPrintMappingPanel::lookup(const Moonraker& host, const std::vector<BoxPr
 void BoxPrintMappingPanel::show_message(const wxString& message)
 {
     m_choices.clear();
-    m_warnings.clear();
+    m_rows.clear();
     m_notice = nullptr;
     auto* rows = m_scroll->GetSizer();
     rows->Clear(true);
     auto* text = new wxStaticText(m_scroll, wxID_ANY, message);
-    text->Wrap(FromDIP(360));
+    text->Wrap(FromDIP(400));
     rows->Add(text, 0, wxEXPAND | wxALL, FromDIP(4));
-    m_scroll->SetMinSize(wxSize(FromDIP(380), rows->CalcMin().y));
+    m_scroll->SetMinSize(wxSize(FromDIP(420), rows->CalcMin().y));
     Layout();
     m_scroll->Layout();
     m_scroll->FitInside();
@@ -120,7 +154,7 @@ void BoxPrintMappingPanel::set_data(const std::vector<BoxPrintTool>& tools,
         return;
     }
     m_choices.clear();
-    m_warnings.clear();
+    m_rows.clear();
     m_notice = nullptr;
     auto* rows = m_scroll->GetSizer();
     rows->Clear(true);
@@ -141,28 +175,48 @@ void BoxPrintMappingPanel::set_data(const std::vector<BoxPrintTool>& tools,
         return bitmap;
     };
 
+    rows->Add(create_print_section_header(m_scroll, _L("Filament"), _L("Load from")), 0, wxEXPAND | wxBOTTOM, FromDIP(6));
     const auto suggested = suggest_box_print_mapping(m_tools, m_slots);
     for (const auto& tool : m_tools) {
-        auto* row = new wxBoxSizer(wxVERTICAL);
-        auto* heading = new wxBoxSizer(wxHORIZONTAL);
+        // Same layout as Fluidd's print dialog: the file's filament, an arrow, then the slot.
+        auto* card = new StaticBox(m_scroll);
+        card->SetCornerRadius(FromDIP(6));
+        // Built after the dialog's dark-mode pass, so take the palette text colour here.
+        card->SetForegroundColour(m_scroll->GetForegroundColour());
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+
         const wxColour color(wxString::FromUTF8(tool.color));
         const auto* badge = get_extruder_color_icon(color.IsOk() ? tool.color : "#808080",
-                                                   std::to_string(tool.id + 1), FromDIP(18), FromDIP(18));
-        heading->Add(new wxStaticBitmap(m_scroll, wxID_ANY, *badge),
-                     0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
-        wxString name = wxString::FromUTF8(tool.name.empty() ? tool.material : tool.name);
-        auto* profile = new wxStaticText(m_scroll, wxID_ANY, name,
-                                         wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
-        profile->SetToolTip(name);
-        profile->SetMinSize(FromDIP(wxSize(100, -1)));
-        heading->Add(profile, 1, wxALIGN_CENTER_VERTICAL);
-        row->Add(heading, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
-        auto* load_from = new wxStaticText(m_scroll, wxID_ANY, _L("Load from"));
-        load_from->SetFont(::Label::Body_12);
-        row->Add(load_from, 0, wxBOTTOM, FromDIP(2));
+                                                   std::to_string(tool.id + 1), FromDIP(20), FromDIP(20));
+        row->Add(new wxStaticBitmap(card, wxID_ANY, *badge), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
 
-        auto* choice = new ComboBox(m_scroll, wxID_ANY, wxEmptyString, wxDefaultPosition,
-                                    FromDIP(wxSize(360, 32)), 0, nullptr, wxCB_READONLY);
+        const wxString material = wxString::FromUTF8(tool.material);
+        const wxString preset   = short_preset_name(tool.name);
+        const wxString full     = wxString::FromUTF8(tool.name.empty() ? tool.material : tool.name);
+        auto* names = new wxBoxSizer(wxVERTICAL);
+        auto* primary = new wxStaticText(card, wxID_ANY, material.empty() ? preset : material,
+                                         wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
+        primary->SetFont(::Label::Body_14);
+        primary->SetMinSize(wxSize(FromDIP(40), -1));
+        primary->SetToolTip(full);
+        names->Add(primary, 0, wxEXPAND);
+        if (!material.empty() && !preset.empty()) {
+            auto* secondary = new wxStaticText(card, wxID_ANY, preset, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
+            secondary->SetFont(::Label::Body_12);
+            secondary->SetForegroundColour(muted_text_colour());
+            secondary->SetMinSize(wxSize(FromDIP(40), -1));
+            secondary->SetToolTip(full);
+            names->Add(secondary, 0, wxEXPAND | wxTOP, FromDIP(2));
+        }
+        row->Add(names, 1, wxALIGN_CENTER_VERTICAL);
+
+        auto* arrow = new wxStaticText(card, wxID_ANY, wxString::FromUTF8("→"));
+        arrow->SetFont(::Label::Body_14);
+        arrow->SetForegroundColour(muted_text_colour());
+        row->Add(arrow, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
+
+        auto* choice = new ComboBox(card, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                    FromDIP(wxSize(220, 32)), 0, nullptr, wxCB_READONLY);
         choice->SetFont(::Label::Body_13);
         choice->SetCornerRadius(4);
         choice->SetKeepDropArrow(true);
@@ -171,7 +225,9 @@ void BoxPrintMappingPanel::set_data(const std::vector<BoxPrintTool>& tools,
         choice->SetSelection(0);
         const auto slot = suggested.find(tool.id);
         for (size_t i = 0; i < m_slots.size(); ++i) {
-            choice->Append(slot_label(m_slots[i]), swatch(m_slots[i].color));
+            const int item = choice->Append(slot_label(m_slots[i]), swatch(m_slots[i].color));
+            if (!m_slots[i].name.empty())
+                choice->SetItemTooltip(item, wxString::FromUTF8(m_slots[i].name));
             if (slot != suggested.end() && m_slots[i].index == slot->second)
                 choice->SetSelection(static_cast<int>(i) + 1);
         }
@@ -179,22 +235,17 @@ void BoxPrintMappingPanel::set_data(const std::vector<BoxPrintTool>& tools,
             update_selection();
             notify_changed();
         });
-        row->Add(choice, 0, wxEXPAND);
-        auto* warning_panel = new wxPanel(m_scroll);
-        auto* warning_row = new wxBoxSizer(wxHORIZONTAL);
-        warning_row->Add(new wxStaticBitmap(warning_panel, wxID_ANY, create_scaled_bitmap("obj_warning", warning_panel, 14)),
-                         0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
-        auto* warning = new wxStaticText(warning_panel, wxID_ANY, wxEmptyString);
-        warning->SetFont(::Label::Body_12);
-        warning->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#B56A00")));
-        warning_row->Add(warning, 1, wxALIGN_CENTER_VERTICAL);
-        warning_panel->SetSizer(warning_row);
-        row->Add(warning_panel, 0, wxEXPAND | wxTOP, FromDIP(4));
-        rows->Add(row, 0, wxEXPAND | wxBOTTOM, FromDIP(16));
+        row->Add(choice, 0, wxALIGN_CENTER_VERTICAL);
+
+        auto* padding = new wxBoxSizer(wxVERTICAL);
+        padding->Add(row, 1, wxEXPAND | wxALL, FromDIP(8));
+        card->SetSizer(padding);
+        rows->Add(card, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
         m_choices.push_back(choice);
-        m_warnings.push_back(warning);
+        m_rows.push_back(card);
     }
     auto* notice_panel = new wxPanel(m_scroll);
+    notice_panel->SetBackgroundColour(m_scroll->GetBackgroundColour());
     auto* notice_row = new wxBoxSizer(wxHORIZONTAL);
     const auto notice_color = StateColor::darkModeColorFor(wxColour("#2196F3"));
     auto* notice_icon = new wxStaticText(notice_panel, wxID_ANY, wxString::FromUTF8("ⓘ"));
@@ -234,26 +285,38 @@ std::string BoxPrintMappingPanel::serialized_mapping() const
 
 void BoxPrintMappingPanel::update_selection()
 {
+    // The row says something is wrong; the picker, naming the slot's material in
+    // the warning colour, says what. A related material (PLA+ for PLA) is no conflict.
+    const wxColour normal_bg = m_scroll->GetBackgroundColour();
+    const bool dark = wxGetApp().dark_mode();
+    const wxColour warning_bg = dark ? wxColour("#3A2E1E") : wxColour("#FFF4E3");
+    const unsigned long warning = dark ? WARNING_DARK : WARNING_RGB;
     bool external = false;
     for (size_t i = 0; i < m_choices.size(); ++i) {
-        wxString warning;
+        bool conflict = false;
         const int selected = m_choices[i]->GetSelection();
         if (selected > 0) {
             const auto& slot = m_slots[selected - 1];
             external |= slot.external;
-            if (!slot.material.empty() && !m_tools[i].material.empty() &&
-                wxString::FromUTF8(slot.material).CmpNoCase(wxString::FromUTF8(m_tools[i].material)) != 0)
-                warning = wxString::Format(_L("File expects %s; selected slot is %s."),
-                    wxString::FromUTF8(m_tools[i].material), wxString::FromUTF8(slot.material));
+            conflict = box_materials_conflict(m_tools[i].material, slot.material);
+            // The closed picker has room for one label, so the warning sign joins it.
+            const wxString label = m_choices[i]->GetString(selected);
+            m_choices[i]->SetLabel(conflict ? label + wxString::FromUTF8(" ⚠") : label);
         }
-        m_warnings[i]->SetLabel(warning);
-        m_warnings[i]->Wrap(FromDIP(340));
-        m_warnings[i]->GetParent()->Show(!warning.empty());
-        m_warnings[i]->GetParent()->Layout();
+        const wxColour bg = conflict ? warning_bg : normal_bg;
+        m_rows[i]->SetBorderColor(StateColor(std::make_pair(conflict ? warning : ROW_BORDER_RGB, (int) StateColor::Normal)));
+        // A plain StaticBox has no background state for SetBackgroundColorNormal to change.
+        m_rows[i]->SetBackgroundColor(StateColor(bg));
+        for (wxWindow* child : m_rows[i]->GetChildren())
+            if (child != m_choices[i])
+                child->SetBackgroundColour(bg);
+        m_choices[i]->SetLabelColor(StateColor(std::make_pair(0x6B6B6BUL, (int) StateColor::Disabled),
+                                               std::make_pair(conflict ? warning : LABEL_RGB, (int) StateColor::Normal)));
+        m_rows[i]->Refresh();
     }
     m_notice->GetParent()->Show(external);
     m_notice->GetParent()->Layout();
-    m_scroll->SetMinSize(wxSize(FromDIP(380), std::min(FromDIP(340), m_scroll->GetSizer()->CalcMin().y)));
+    m_scroll->SetMinSize(wxSize(FromDIP(420), std::min(FromDIP(360), m_scroll->GetSizer()->CalcMin().y)));
     Layout();
     m_scroll->Layout();
     m_scroll->FitInside();

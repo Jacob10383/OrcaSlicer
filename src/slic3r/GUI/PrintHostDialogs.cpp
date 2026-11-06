@@ -1,5 +1,6 @@
 #include "PrintHostDialogs.hpp"
 #include "BoxPrintMappingDialog.hpp"
+#include "slic3r/Utils/BoxPrintMapping.hpp"
 
 #include <algorithm>
 #include <boost/algorithm/string/trim.hpp>
@@ -22,6 +23,9 @@
 #include <wx/dcclient.h>
 #include <memory>
 #include "slic3r/GUI/Widgets/Label.hpp"
+#include "slic3r/GUI/Widgets/StaticBox.hpp"
+#include "slic3r/GUI/Widgets/TextInput.hpp"
+#include <wx/valtext.h>
 #include "slic3r/GUI/GUI_Utils.hpp"
 #include <vector>
 #include <utility>
@@ -494,6 +498,106 @@ void PrintHostSendDialog::set_box_print_mapping(const Moonraker& host, const std
     m_box_mapping->lookup(host, tools, plate_error);
 }
 
+void PrintHostSendDialog::set_heat_soak(const Moonraker& host)
+{
+    m_soak_row = new wxPanel(this);
+    m_soak_row->SetBackgroundColour(GetBackgroundColour());
+    auto* section = new wxBoxSizer(wxVERTICAL);
+    section->Add(create_print_section_header(m_soak_row, _L("Before printing")), 0, wxEXPAND | wxBOTTOM, FromDIP(6));
+    auto* row = new wxBoxSizer(wxHORIZONTAL);
+    auto* label = new wxStaticText(m_soak_row, wxID_ANY, _L("Heat soak"));
+    label->SetFont(::Label::Body_14);
+    row->Add(label, 1, wxALIGN_CENTER_VERTICAL);
+
+    // A joined "- value +" stepper, as wide and tall as the Box slot pickers above it.
+    auto* stepper = new StaticBox(m_soak_row);
+    stepper->SetCornerRadius(FromDIP(4));
+    stepper->SetBorderColor(StateColor(std::make_pair(0xDBDBDBUL, (int) StateColor::Normal)));
+    stepper->SetBackgroundColor(StateColor(std::make_pair(0xFFFFFFUL, (int) StateColor::Normal)));
+    auto* steps = new wxBoxSizer(wxHORIZONTAL);
+    const auto divider = [stepper] {
+        auto* line = new wxPanel(stepper, wxID_ANY, wxDefaultPosition, wxSize(1, -1));
+        line->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#DBDBDB")));
+        return line;
+    };
+    const auto step_button = [this, stepper](const wxString& text, int delta) {
+        auto* button = new ::Button(stepper, text);
+        button->SetFont(::Label::Body_16);
+        button->SetBorderWidth(0);
+        button->SetCornerRadius(FromDIP(3));
+        button->SetCanFocus(false);
+        button->SetBackgroundColor(StateColor(std::make_pair(0xF8F8F8UL, (int) StateColor::Disabled),
+                                              std::make_pair(0xDFDFDFUL, (int) StateColor::Pressed),
+                                              std::make_pair(0xEEEEEEUL, (int) StateColor::Hovered),
+                                              std::make_pair(0xF8F8F8UL, (int) StateColor::Normal)));
+        button->SetTextColor(StateColor(std::make_pair(0xACACACUL, (int) StateColor::Disabled),
+                                        std::make_pair(0x262E30UL, (int) StateColor::Normal)));
+        button->SetMinSize(FromDIP(wxSize(40, 30)));
+        button->Bind(wxEVT_BUTTON, [this, delta](wxCommandEvent&) { set_soak_minutes(m_soak_minutes + delta); });
+        return button;
+    };
+    m_soak_less = step_button(wxString::FromUTF8("−"), -5);
+    m_soak_more = step_button("+", 5);
+
+    m_soak = new ::TextInput(stepper, "0", _L("min"), "", wxDefaultPosition, FromDIP(wxSize(72, 30)));
+    m_soak->SetBorderWidth(0);
+    wxTextCtrl* text = m_soak->GetTextCtrl();
+    // The minutes sit right against their unit, centred in the stepper.
+    text->SetWindowStyleFlag(text->GetWindowStyleFlag() | wxTE_RIGHT);
+    text->SetValidator(wxTextValidator(wxFILTER_DIGITS));
+    text->SetMaxLength(3);
+    text->Bind(wxEVT_TEXT, [this, text](wxCommandEvent& e) {
+        long value = 0;
+        if (text->GetValue().ToLong(&value))
+            m_soak_minutes = std::clamp(static_cast<int>(value), 0, MAX_HEAT_SOAK_MINUTES);
+        e.Skip();
+    });
+    // Leaving the field shows the value that will be sent: the last valid one, clamped.
+    text->Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent& e) {
+        set_soak_minutes(m_soak_minutes);
+        e.Skip();
+    });
+
+    steps->Add(m_soak_less, 0, wxEXPAND);
+    steps->Add(divider(), 0, wxEXPAND);
+    steps->AddStretchSpacer();
+    steps->Add(m_soak, 0, wxALIGN_CENTER_VERTICAL);
+    steps->AddStretchSpacer();
+    steps->Add(divider(), 0, wxEXPAND);
+    steps->Add(m_soak_more, 0, wxEXPAND);
+    auto* inset = new wxBoxSizer(wxVERTICAL);
+    inset->Add(steps, 1, wxEXPAND | wxALL, 1); // inside the 1 px border
+    stepper->SetSizer(inset);
+    stepper->SetMinSize(FromDIP(wxSize(220, 32)));
+    // The pickers above sit 8 DIP inside their cards; the label lines up with the header.
+    row->Add(stepper, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(9));
+    section->Add(row, 0, wxEXPAND);
+    m_soak_row->SetSizer(section);
+    m_soak_row->Hide();
+
+    fetch_heat_soak_status_async(host, [this, alive = m_alive](const HeatSoakStatus& status) {
+        wxGetApp().CallAfter([this, alive, status] {
+            if (!*alive || !status.supported)
+                return;
+            // The probe only reports a supported printer whose heat_soak is in range.
+            m_soak_default = status.minutes;
+            set_soak_minutes(status.minutes);
+            m_soak_row->Show();
+            Layout();
+            Fit();
+        });
+    });
+}
+
+void PrintHostSendDialog::set_soak_minutes(int minutes)
+{
+    m_soak_minutes = std::clamp(minutes, 0, MAX_HEAT_SOAK_MINUTES);
+    // ChangeValue: no wxEVT_TEXT, so the typed-value handler doesn't run again.
+    m_soak->GetTextCtrl()->ChangeValue(wxString::Format("%d", m_soak_minutes));
+    m_soak_less->Enable(m_soak_minutes > 0);
+    m_soak_more->Enable(m_soak_minutes < MAX_HEAT_SOAK_MINUTES);
+}
+
 void PrintHostSendDialog::init()
 {
     const auto& path = m_path;
@@ -565,6 +669,8 @@ void PrintHostSendDialog::init()
 
     if (m_box_mapping)
         content_sizer->Add(m_box_mapping, 0, wxEXPAND | wxTOP, FromDIP(12));
+    if (m_soak_row)
+        content_sizer->Add(m_soak_row, 0, wxEXPAND | wxTOP, FromDIP(12));
 
     if (size_t extension_start = recent_path.find_last_of('.'); extension_start != std::string::npos)
         m_valid_suffix = recent_path.substr(extension_start);
@@ -664,12 +770,17 @@ PrintHostPostUploadAction PrintHostSendDialog::post_action() const
 
 std::map<std::string, std::string> PrintHostSendDialog::extendedInfo() const
 {
-    if (post_upload_action == PrintHostPostUploadAction::StartPrint && m_box_mapping) {
-        // Empty when the printer has no Box mapping support: that is an ordinary start.
+    std::map<std::string, std::string> info;
+    if (post_upload_action != PrintHostPostUploadAction::StartPrint)
+        return info;
+    // Empty when the printer has no Box mapping support: that is an ordinary start.
+    if (m_box_mapping)
         if (const std::string mapping = m_box_mapping->serialized_mapping(); !mapping.empty())
-            return {{"box_mapping", mapping}};
-    }
-    return {};
+            info["box_mapping"] = mapping;
+    // An unchanged value is left to the printer's own setting.
+    if (m_soak_row && m_soak_row->IsShown() && m_soak_minutes != m_soak_default)
+        info["heat_soak"] = std::to_string(m_soak_minutes);
+    return info;
 }
 
 std::string PrintHostSendDialog::group() const

@@ -21191,6 +21191,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
             // The dialog opens immediately; the panel checks Box support in the background.
             pDlg->set_box_print_mapping(static_cast<const Moonraker&>(*upload_job.printhost),
                                         collect_box_print_tools(selected_plate, sliced_config), plate_error);
+            pDlg->set_heat_soak(static_cast<const Moonraker&>(*upload_job.printhost));
         }
 
         pDlg->init();
