@@ -717,6 +717,8 @@ TEST_CASE("Heat soak is offered with the printer's setting when START_PRINT take
 TEST_CASE("Heat soak is hidden for older configs, other printers and failed queries", "[BoxPrintMapping]")
 {
     const auto reply = GENERATE(PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", 5}})).dump()},
+                                // What Klipper answers for a config without soak_once.
+                                PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", 5}, {"soak_once", nullptr}})).dump()},
                                 PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", "5"}, {"soak_once", -1}})).dump()},
                                 PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", -1}, {"soak_once", -1}})).dump()},
                                 // Longer than the dialog offers: left to the printer's setting.

@@ -311,7 +311,9 @@ void fetch_heat_soak_status_async(const Moonraker& host, std::function<void(cons
         try {
             const auto& vars = response.body.at("result").at("status").at(SOAK_MACRO);
             const auto& minutes = vars.at("heat_soak");
-            if (response.success && vars.contains("soak_once") && minutes.is_number() && minutes >= 0 &&
+            // Klipper reports a queried variable the macro lacks as null, so an
+            // older config still has a soak_once key.
+            if (response.success && vars.at("soak_once").is_number() && minutes.is_number() && minutes >= 0 &&
                 minutes <= MAX_HEAT_SOAK_MINUTES) {
                 status.supported = true;
                 status.minutes = static_cast<int>(std::lround(minutes.get<double>()));
