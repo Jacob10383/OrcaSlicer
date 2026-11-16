@@ -483,6 +483,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrintHostDialogs.hpp
     GUI/BoxPrintMappingDialog.cpp
     GUI/BoxPrintMappingDialog.hpp
+    GUI/PrintOptionsPanel.cpp
+    GUI/PrintOptionsPanel.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp

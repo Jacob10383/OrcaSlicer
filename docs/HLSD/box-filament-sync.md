@@ -78,16 +78,31 @@ can start or queue the job itself. Only when the reply reports neither
 printer lacks Box mapping support. A mapped upload never requests automatic
 printing, since Moonraker would start the file before Box installs the map.
 
-Upload and Print also offers a heat soak time when the printer's
-`_START_PRINT_VARS` macro reports `soak_once`, starting from its `heat_soak`
-setting. Like Fluidd, it offers up to 240 minutes, and is not offered when that
-setting is longer. The printer's setting decides unless the user changes the value. A
-changed value is not written into the G-code: it goes in the start request,
-as a `SET_GCODE_VARIABLE ... VARIABLE=soak_once` line after `BOX_PRINT_START`
-or `SDCARD_PRINT_FILE`, and `START_PRINT` uses it once. Klipper runs a G-code
-script under one lock and stops it at the first error, and Virtual SD waits for
-that lock, so the value is set only when the start succeeds and before the
-file's first line. Such an upload never requests automatic printing, for the
+Upload and Print also offers the print options the printer reports in
+`printer.print_control.options`: each has an id, a label, a heading and a type,
+and the dialog draws a row for each (`PrintOptionsPanel`). A `minutes` option is
+a stepper; a `switch` is a switch; an optional `minutes` option is a switch that
+asks for a time once it is on. The labels are the printer's own text, so they
+are not translated, and an option of a type Orca does not know is left out. A
+new option on the printer therefore needs no Orca change.
+
+The choices are not written into the G-code. They go in the start request as a
+`PRINT_OPTIONS <ID>=<value> ...` line ahead of `BOX_PRINT_START` or
+`SDCARD_PRINT_FILE`, in one G-code script. Klipper runs a script under one lock
+and stops it at the first error, so a rejected option stops the script before
+the print starts, and Virtual SD waits for that lock, so the file's first line
+runs after both. The printer holds the choices for the next file that loads.
+Only what the user changed is sent: an untouched option is left to the
+printer's setting and the file's own start parameters.
+
+A printer without print options whose `_START_PRINT_VARS` macro has `soak_once`
+is offered the heat soak alone, starting from its `heat_soak` setting, up to
+240 minutes, and not at all when that setting is longer. A changed value goes
+as a `SET_GCODE_VARIABLE ... VARIABLE=soak_once` line after the start command,
+so it is set only when the start succeeds. Klipper reports a queried variable
+the macro lacks as `null`, so `soak_once` must be a number to count.
+
+An upload with any of these choices never requests automatic printing, for the
 same reason as a mapped one.
 
 The transport uses upstream Moonraker's object-query and G-code-script endpoints.

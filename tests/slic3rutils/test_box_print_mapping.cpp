@@ -125,7 +125,7 @@ std::unique_ptr<Moonraker> host(const PrintServer& server, const std::string& ap
 }
 bool legacy_upload(PrintServer& server, PrintHostPostUploadAction action, const std::string& mapping, std::string& error,
                    const PrintHost::ProgressFn& progress = {}, const std::string& storage = {},
-                   const std::string& soak = {})
+                   const std::string& soak = {}, const std::string& print_options = {})
 {
     ScopedTemporaryFile source(".gcode");
     {
@@ -141,6 +141,8 @@ bool legacy_upload(PrintServer& server, PrintHostPostUploadAction action, const 
     upload.extended_info["box_mapping"] = mapping;
     if (!soak.empty())
         upload.extended_info["heat_soak"] = soak;
+    if (!print_options.empty())
+        upload.extended_info["print_options"] = print_options;
     return moonraker->upload(std::move(upload), [&](Http::Progress p, bool& cancel) { if (progress) progress(p, cancel); },
                        [&](wxString message) { error = message.ToUTF8().data(); }, [](wxString, wxString) {});
 }
@@ -687,56 +689,167 @@ TEST_CASE("Legacy mapped printing reports firmware rejection when a selected slo
 }
 
 namespace {
-HeatSoakStatus heat_soak_status(PrintServer& server)
+PrintStartOptions print_start_options(PrintServer& server)
 {
-    std::promise<HeatSoakStatus> result;
-    fetch_heat_soak_status_async(*host(server), [&](const HeatSoakStatus& status) { result.set_value(status); });
+    std::promise<PrintStartOptions> result;
+    fetch_print_start_options_async(*host(server), [&](const PrintStartOptions& options) { result.set_value(options); });
     auto future = result.get_future();
     REQUIRE(future.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
     server.finish();
     return future.get();
 }
 
-json soak_vars(json vars)
+// What Klipper answers: {} for an object the printer does not have, and null
+// for a queried variable the macro lacks.
+json start_options_reply(json vars, json control = json::object())
 {
-    return {{"result", {{"status", {{"gcode_macro _START_PRINT_VARS", std::move(vars)}}}}}};
+    return {{"result", {{"status", {{"print_control", std::move(control)}, {"gcode_macro _START_PRINT_VARS", std::move(vars)}}}}}};
 }
+
+const json soak_option = {{"id", "soak"}, {"label", "Heat soak"}, {"section", "Before printing"}, {"hint", ""},
+                          {"type", "minutes"}, {"optional", false}, {"value_label", ""}, {"min", 0}, {"max", 240},
+                          {"step", 5}, {"default", 7.6}};
+const json keep_option = {{"id", "keep_heated"}, {"label", "Keep bed and chamber heated"}, {"section", "After printing"},
+                          {"hint", "The nozzle still turns off."}, {"type", "minutes"}, {"optional", true},
+                          {"value_label", "Turn off after"}, {"min", 1}, {"max", 240}, {"step", 15}, {"default", 30}};
+const json switch_option = {{"id", "pa_calibrate"}, {"label", "Calibrate pressure advance"}, {"section", "Before printing"},
+                            {"hint", ""}, {"type", "switch"}, {"default", false}};
+
+json print_control(json options) { return {{"version", 1}, {"options", std::move(options)}, {"active", json::object()}}; }
 } // namespace
 
-TEST_CASE("Heat soak is offered with the printer's setting when START_PRINT takes a one-time soak", "[BoxPrintMapping]")
+TEST_CASE("The printer's print options are offered as it describes them", "[BoxPrintMapping]")
 {
-    PrintServer server({{200, soak_vars(json::object({{"heat_soak", 7.6}, {"soak_once", -1}})).dump()}});
-    const auto status = heat_soak_status(server);
-    CHECK(status.supported);
-    CHECK(status.minutes == 8);
+    PrintServer server({{200, start_options_reply({{"heat_soak", 5}, {"soak_once", -1}},
+                                                  print_control({soak_option, keep_option, switch_option})).dump()}});
+    const auto offered = print_start_options(server);
     REQUIRE(server.requests.size() == 1);
     CHECK(server.requests.front().find(
-              "GET /moonraker/printer/objects/query?gcode_macro%20_START_PRINT_VARS=heat_soak,soak_once HTTP/") == 0);
+              "GET /moonraker/printer/objects/query?print_control&gcode_macro%20_START_PRINT_VARS=heat_soak,soak_once HTTP/") == 0);
+    // Print options replace the one-time soak.
+    CHECK_FALSE(offered.soak_once_default);
+    REQUIRE(offered.options.size() == 3);
+    const auto& soak = offered.options[0];
+    CHECK(soak.id == "soak");
+    CHECK(soak.label == "Heat soak");
+    CHECK(soak.section == "Before printing");
+    CHECK(soak.type == PrintOption::Type::Minutes);
+    CHECK_FALSE(soak.optional);
+    CHECK(soak.min == 0);
+    CHECK(soak.max == 240);
+    CHECK(soak.step == 5);
+    CHECK(soak.default_value == 8);
+    const auto& keep = offered.options[1];
+    CHECK(keep.optional);
+    CHECK(keep.hint == "The nozzle still turns off.");
+    CHECK(keep.value_label == "Turn off after");
+    CHECK(keep.min == 1);
+    CHECK(keep.step == 15);
+    CHECK(keep.default_value == 30);
+    CHECK(offered.options[2].type == PrintOption::Type::Switch);
+    CHECK(offered.options[2].default_value == 0);
 }
 
-TEST_CASE("Heat soak is hidden for older configs, other printers and failed queries", "[BoxPrintMapping]")
+TEST_CASE("Print options the dialog cannot draw are left out and values kept in range", "[BoxPrintMapping]")
 {
-    const auto reply = GENERATE(PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", 5}})).dump()},
-                                // What Klipper answers for a config without soak_once.
-                                PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", 5}, {"soak_once", nullptr}})).dump()},
-                                PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", "5"}, {"soak_once", -1}})).dump()},
-                                PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", -1}, {"soak_once", -1}})).dump()},
-                                // Longer than the dialog offers: left to the printer's setting.
-                                PrintServer::Reply{200, soak_vars(json::object({{"heat_soak", MAX_HEAT_SOAK_MINUTES + 1},
-                                                                                {"soak_once", -1}})).dump()},
-                                PrintServer::Reply{200, R"({"result":{"status":{}}})"},
-                                PrintServer::Reply{200, R"({"result":[]})"},
-                                PrintServer::Reply{200, "not JSON"},
-                                PrintServer::Reply{404, R"({"error":{"message":"x"}})"});
-    PrintServer server({reply});
-    CHECK_FALSE(heat_soak_status(server).supported);
+    json unknown_type = soak_option, bad_id = soak_option, no_label = soak_option, wild = keep_option, bare;
+    unknown_type["type"] = "choice";
+    bad_id["id"]         = "Bad Id";
+    no_label["label"]    = "";
+    wild["default"]      = 1e12;
+    wild["step"]         = 0;
+    bare                 = {{"id", "bare"}, {"label", "Bare"}, {"type", "minutes"}};
+    PrintServer server({{200, start_options_reply({{"heat_soak", nullptr}, {"soak_once", nullptr}},
+                                                  print_control({unknown_type, bad_id, no_label, nullptr, wild, bare})).dump()}});
+    const auto offered = print_start_options(server);
+    REQUIRE(offered.options.size() == 2);
+    CHECK(offered.options[0].id == "keep_heated");
+    CHECK(offered.options[0].default_value == 240);
+    CHECK(offered.options[0].step == 1);
+    CHECK(offered.options[1].id == "bare");
+    CHECK(offered.options[1].min == 0);
+    CHECK(offered.options[1].max == 240);
+    CHECK(offered.options[1].default_value == 0);
 }
 
-TEST_CASE("A chosen heat soak is set in the same request as a Box start", "[BoxPrintMapping]")
+TEST_CASE("Print choices send only what was changed or switched on", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, start_options_reply({{"heat_soak", 5}, {"soak_once", -1}},
+                                                  print_control({soak_option, keep_option, switch_option})).dump()}});
+    const auto options = print_start_options(server).options;
+    REQUIRE(options.size() == 3);
+    std::vector<PrintChoice> choices;
+    for (const auto& option : options)
+        choices.push_back(default_print_choice(option));
+    CHECK(choices[0].on);
+    CHECK(choices[0].minutes == 8);
+    CHECK_FALSE(choices[1].on);
+    CHECK(choices[1].minutes == 30);
+    CHECK_FALSE(choices[2].on);
+    CHECK(print_options_command(options, choices).empty());
+
+    choices[1].on = true;
+    CHECK(print_options_command(options, choices) == "PRINT_OPTIONS KEEP_HEATED=30");
+    choices[0].minutes = 0;
+    choices[1].minutes = 999;
+    choices[2].on      = true;
+    CHECK(print_options_command(options, choices) == "PRINT_OPTIONS SOAK=0 KEEP_HEATED=240 PA_CALIBRATE=1");
+}
+
+TEST_CASE("The one-time heat soak is offered when the printer has no print options", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, start_options_reply({{"heat_soak", 7.6}, {"soak_once", -1}}).dump()}});
+    const auto offered = print_start_options(server);
+    CHECK(offered.options.empty());
+    REQUIRE(offered.soak_once_default);
+    CHECK(*offered.soak_once_default == 8);
+}
+
+TEST_CASE("Nothing is offered for older configs, other printers and failed queries", "[BoxPrintMapping]")
+{
+    const auto reply = GENERATE(
+        // What Klipper answers for a config without soak_once.
+        PrintServer::Reply{200, start_options_reply({{"heat_soak", 5}, {"soak_once", nullptr}}).dump()},
+        PrintServer::Reply{200, start_options_reply({{"heat_soak", 5}}).dump()},
+        PrintServer::Reply{200, start_options_reply({{"heat_soak", "5"}, {"soak_once", -1}}).dump()},
+        PrintServer::Reply{200, start_options_reply({{"heat_soak", -1}, {"soak_once", -1}}).dump()},
+        // Longer than the dialog offers: left to the printer's setting.
+        PrintServer::Reply{200, start_options_reply({{"heat_soak", MAX_HEAT_SOAK_MINUTES + 1}, {"soak_once", -1}}).dump()},
+        // print_control without a version or an option list.
+        PrintServer::Reply{200, start_options_reply({{"heat_soak", nullptr}, {"soak_once", nullptr}},
+                                                    {{"options", json::array({soak_option})}}).dump()},
+        PrintServer::Reply{200, start_options_reply({{"heat_soak", nullptr}, {"soak_once", nullptr}}, {{"version", 1}}).dump()},
+        PrintServer::Reply{200, R"({"result":{"status":{}}})"},
+        PrintServer::Reply{200, R"({"result":[]})"},
+        PrintServer::Reply{200, "not JSON"},
+        PrintServer::Reply{404, R"({"error":{"message":"x"}})"});
+    PrintServer server({reply});
+    const auto offered = print_start_options(server);
+    CHECK(offered.options.empty());
+    CHECK_FALSE(offered.soak_once_default);
+}
+
+TEST_CASE("Print options go ahead of a Box start in the same request", "[BoxPrintMapping]")
 {
     PrintServer server({{200, box_response().dump()}, {200, ok}, {200, print_info("stored.gcode").dump()}, {200, ok}});
     std::string error;
-    REQUIRE(start_box_print(*host(server), "stored.gcode", R"({"1":8,"5":12})", error, {}, {}, 0));
+    PrintStartChoices choices;
+    choices.print_options = "PRINT_OPTIONS SOAK=0 KEEP_HEATED=30";
+    REQUIRE(start_box_print(*host(server), "stored.gcode", R"({"1":8,"5":12})", error, {}, {}, choices));
+    server.finish();
+    REQUIRE(server.requests.size() == 4);
+    CHECK(request_body(server.requests[3])["script"] ==
+          "PRINT_OPTIONS SOAK=0 KEEP_HEATED=30\n"
+          "BOX_PRINT_START FILENAME=\"stored.gcode\" MAP=\"1:8,5:12\"");
+}
+
+TEST_CASE("A chosen one-time heat soak is set in the same request as a Box start", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, box_response().dump()}, {200, ok}, {200, print_info("stored.gcode").dump()}, {200, ok}});
+    std::string error;
+    PrintStartChoices choices;
+    choices.soak_once = 0;
+    REQUIRE(start_box_print(*host(server), "stored.gcode", R"({"1":8,"5":12})", error, {}, {}, choices));
     server.finish();
     REQUIRE(server.requests.size() == 4);
     CHECK(request_body(server.requests[3])["script"] ==
@@ -744,11 +857,13 @@ TEST_CASE("A chosen heat soak is set in the same request as a Box start", "[BoxP
           "SET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=0");
 }
 
-TEST_CASE("A chosen heat soak replaces Moonraker's start with one start script", "[BoxPrintMapping]")
+TEST_CASE("A chosen one-time heat soak replaces Moonraker's start with one start script", "[BoxPrintMapping]")
 {
     PrintServer server({{200, R"({"result":{"status":{}}})"}, {200, ok}});
     std::string error;
-    REQUIRE(start_box_print(*host(server), "a \"b\".gcode", "", error, {}, {}, 12));
+    PrintStartChoices choices;
+    choices.soak_once = 12;
+    REQUIRE(start_box_print(*host(server), "a \"b\".gcode", "", error, {}, {}, choices));
     server.finish();
     REQUIRE(server.requests.size() == 2);
     CHECK(server.requests[1].find("POST /moonraker/printer/gcode/script HTTP/") == 0);
@@ -757,7 +872,7 @@ TEST_CASE("A chosen heat soak replaces Moonraker's start with one start script",
           "SET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=12");
 }
 
-TEST_CASE("Upload and Print with a chosen heat soak starts the stored file itself", "[BoxPrintMapping]")
+TEST_CASE("Upload and Print with a chosen one-time heat soak starts the stored file itself", "[BoxPrintMapping]")
 {
     PrintServer server({{200, R"({"result":{"klippy_state":"ready"}})"},
                         {201, json{{"item", {{"path", "stored.gcode"}, {"root", "gcodes"}}}, {"action", "create_file"},
@@ -771,6 +886,22 @@ TEST_CASE("Upload and Print with a chosen heat soak starts the stored file itsel
     CHECK(request_body(server.requests[3])["script"] ==
           "SDCARD_PRINT_FILE FILENAME=\"stored.gcode\"\n"
           "SET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=15");
+}
+
+TEST_CASE("Upload and Print with print options starts the stored file itself", "[BoxPrintMapping]")
+{
+    PrintServer server({{200, R"({"result":{"klippy_state":"ready"}})"},
+                        {201, json{{"item", {{"path", "stored.gcode"}, {"root", "gcodes"}}}, {"action", "create_file"},
+                                   {"print_started", false}, {"print_queued", false}}.dump()},
+                        {200, R"({"result":{"status":{}}})"}, {200, ok}});
+    std::string error;
+    REQUIRE(legacy_upload(server, PrintHostPostUploadAction::StartPrint, "", error, {}, {}, {}, "PRINT_OPTIONS KEEP_HEATED=45"));
+    server.finish();
+    REQUIRE(server.requests.size() == 4);
+    CHECK(server.requests[1].find("name=\"print\"\r\n\r\nfalse") != std::string::npos);
+    CHECK(request_body(server.requests[3])["script"] ==
+          "PRINT_OPTIONS KEEP_HEATED=45\n"
+          "SDCARD_PRINT_FILE FILENAME=\"stored.gcode\"");
 }
 
 TEST_CASE("Box material warnings flag only different material families", "[BoxPrintMapping]")

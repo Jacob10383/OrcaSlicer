@@ -226,12 +226,13 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
     std::string uploaded_root = root;
     bool uploaded_path_confirmed = false;
     const std::string box_mapping = upload_data.extended("box_mapping");
-    // A heat soak chosen at print start goes in the same request as the start,
-    // so Orca starts the print instead of Moonraker.
-    std::optional<int> soak_minutes;
+    // What was chosen at print start goes in the same request as the start, so
+    // Orca starts the print instead of Moonraker.
+    PrintStartChoices choices;
+    choices.print_options = upload_data.extended("print_options");
     if (const std::string soak = upload_data.extended("heat_soak"); !soak.empty())
-        soak_minutes = std::stoi(soak);
-    const bool moonraker_start = start_print && box_mapping.empty() && !soak_minutes;
+        choices.soak_once = std::stoi(soak);
+    const bool moonraker_start = start_print && box_mapping.empty() && choices.empty();
     bool moonraker_started_print = false;
     size_t uploaded_bytes = 0;
     const auto report_progress = [&](Http::Progress progress, bool& cancel) {
@@ -318,7 +319,7 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
         return false;
 
     if (start_print && !moonraker_started_print) {
-        if ((!box_mapping.empty() || soak_minutes) && !uploaded_path_confirmed) {
+        if ((!box_mapping.empty() || !choices.empty()) && !uploaded_path_confirmed) {
             error_fn(wxString::FromUTF8("Moonraker did not confirm the uploaded filename. The print was not started."));
             return false;
         }
@@ -348,7 +349,7 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
             return !cancel;
         };
         if (!start_box_print(*this, uploaded_path, box_mapping, error,
-                             [&] { return !proceed(false); }, [&] { return proceed(true); }, soak_minutes)) {
+                             [&] { return !proceed(false); }, [&] { return proceed(true); }, choices)) {
             if (!print_cancelled)
                 error_fn(wxString::FromUTF8(error));
             return false;

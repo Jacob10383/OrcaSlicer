@@ -18,7 +18,8 @@ using nlohmann::json;
 
 const char* const STATUS_QUERY = "printer/objects/query?box";
 const char* const SOAK_MACRO = "gcode_macro _START_PRINT_VARS";
-const char* const SOAK_QUERY = "printer/objects/query?gcode_macro%20_START_PRINT_VARS=heat_soak,soak_once";
+const char* const START_OPTIONS_QUERY =
+    "printer/objects/query?print_control&gcode_macro%20_START_PRINT_VARS=heat_soak,soak_once";
 
 struct Response
 {
@@ -90,20 +91,21 @@ bool script(const Moonraker& host, const std::string& script, std::string& error
     return request(host, "printer/gcode/script", &body, response, error);
 }
 
-// Appended to a start script. A failed start stops the script before this line,
-// and Virtual SD waits for the script to finish before reading the file.
-std::string soak_line(std::optional<int> soak_minutes)
+// The start command with the dialog's choices around it, as one script. Virtual
+// SD waits for the script to finish before reading the file.
+std::string start_script(const std::string& start_command, const PrintStartChoices& choices)
 {
-    return soak_minutes ? "\nSET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=" +
-                              std::to_string(*soak_minutes) :
-                          std::string();
+    std::string result = choices.print_options.empty() ? start_command : choices.print_options + "\n" + start_command;
+    if (choices.soak_once)
+        result += "\nSET_GCODE_VARIABLE MACRO=_START_PRINT_VARS VARIABLE=soak_once VALUE=" + std::to_string(*choices.soak_once);
+    return result;
 }
 
 bool ordinary_start(const Moonraker& host, const std::string& filename, const std::string& quoted_filename,
-                    std::optional<int> soak_minutes, std::string& error)
+                    const PrintStartChoices& choices, std::string& error)
 {
-    if (soak_minutes)
-        return script(host, "SDCARD_PRINT_FILE FILENAME=" + quoted_filename + soak_line(soak_minutes), error);
+    if (!choices.empty())
+        return script(host, start_script("SDCARD_PRINT_FILE FILENAME=" + quoted_filename, choices), error);
     const json body = {{"filename", filename}};
     json response;
     return request(host, "printer/print/start", &body, response, error);
@@ -303,25 +305,117 @@ void fetch_box_print_status_async(const Moonraker& host, BoxPrintStatusFn done)
     http.perform();
 }
 
-void fetch_heat_soak_status_async(const Moonraker& host, std::function<void(const HeatSoakStatus&)> done)
+namespace {
+std::string text_or_empty(const json& option, const char* key)
 {
-    auto http = make_request(host, SOAK_QUERY, nullptr, true);
+    const auto found = option.find(key);
+    return found != option.end() && found->is_string() ? found->get<std::string>() : std::string();
+}
+
+int whole_or(const json& option, const char* key, int fallback)
+{
+    const auto found = option.find(key);
+    if (found == option.end() || !found->is_number())
+        return fallback;
+    // Clamped before the cast, which is undefined for a value outside int.
+    return static_cast<int>(std::lround(std::clamp(found->get<double>(), -100000.0, 100000.0)));
+}
+
+// An id that is safe as a G-code parameter name: what the firmware accepts.
+bool valid_option_id(const std::string& id)
+{
+    return !id.empty() && std::islower(static_cast<unsigned char>(id.front())) &&
+           std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::islower(c) || std::isdigit(c) || c == '_'; });
+}
+
+// Options this version cannot draw are left out.
+std::vector<PrintOption> parse_print_options(const json& control)
+{
+    std::vector<PrintOption> options;
+    if (!control.is_object() || !control.contains("version") || !control["version"].is_number() ||
+        !control.contains("options") || !control["options"].is_array())
+        return options;
+    for (const auto& raw : control["options"]) {
+        if (!raw.is_object())
+            continue;
+        PrintOption option;
+        option.id          = text_or_empty(raw, "id");
+        option.label       = text_or_empty(raw, "label");
+        option.section     = text_or_empty(raw, "section");
+        option.hint        = text_or_empty(raw, "hint");
+        option.value_label = text_or_empty(raw, "value_label");
+        const std::string type = text_or_empty(raw, "type");
+        if (!valid_option_id(option.id) || option.label.empty())
+            continue;
+        if (type == "switch") {
+            option.default_value = raw.value("default", json(false)) == json(true) ? 1 : 0;
+        } else if (type == "minutes") {
+            option.type          = PrintOption::Type::Minutes;
+            option.optional      = raw.value("optional", json(false)) == json(true);
+            option.max           = std::max(1, whole_or(raw, "max", 240));
+            option.min           = std::clamp(whole_or(raw, "min", 0), 0, option.max);
+            option.step          = std::max(1, whole_or(raw, "step", 5));
+            option.default_value = std::clamp(whole_or(raw, "default", option.min), option.min, option.max);
+        } else {
+            continue;
+        }
+        options.push_back(std::move(option));
+    }
+    return options;
+}
+} // namespace
+
+PrintChoice default_print_choice(const PrintOption& option)
+{
+    if (option.type == PrintOption::Type::Switch)
+        return {option.default_value == 1, 0};
+    return {!option.optional, option.default_value};
+}
+
+std::string print_options_command(const std::vector<PrintOption>& options, const std::vector<PrintChoice>& choices)
+{
+    std::string params;
+    for (size_t i = 0; i < options.size() && i < choices.size(); ++i) {
+        const PrintOption& option = options[i];
+        const PrintChoice& choice = choices[i];
+        int value = 0;
+        if (option.type == PrintOption::Type::Switch) {
+            if (choice.on == (option.default_value == 1))
+                continue;
+            value = choice.on ? 1 : 0;
+        } else {
+            if (!choice.on || (!option.optional && choice.minutes == option.default_value))
+                continue;
+            value = std::clamp(choice.minutes, option.min, option.max);
+        }
+        std::string name = option.id;
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::toupper(c); });
+        params += " " + name + "=" + std::to_string(value);
+    }
+    return params.empty() ? params : "PRINT_OPTIONS" + params;
+}
+
+void fetch_print_start_options_async(const Moonraker& host, std::function<void(const PrintStartOptions&)> done)
+{
+    auto http = make_request(host, START_OPTIONS_QUERY, nullptr, true);
     on_response(http, [done](const Response& response) {
-        HeatSoakStatus status;
+        PrintStartOptions result;
         try {
-            const auto& vars = response.body.at("result").at("status").at(SOAK_MACRO);
+            const auto& status = response.body.at("result").at("status");
+            // Klipper answers {} for an object the printer does not have.
+            if (response.success && status.contains("print_control"))
+                result.options = parse_print_options(status["print_control"]);
+            const auto& vars    = status.at(SOAK_MACRO);
             const auto& minutes = vars.at("heat_soak");
             // Klipper reports a queried variable the macro lacks as null, so an
             // older config still has a soak_once key.
-            if (response.success && vars.at("soak_once").is_number() && minutes.is_number() && minutes >= 0 &&
-                minutes <= MAX_HEAT_SOAK_MINUTES) {
-                status.supported = true;
-                status.minutes = static_cast<int>(std::lround(minutes.get<double>()));
-            }
+            if (response.success && result.options.empty() && vars.at("soak_once").is_number() && minutes.is_number() &&
+                minutes >= 0 && minutes <= MAX_HEAT_SOAK_MINUTES)
+                result.soak_once_default = static_cast<int>(std::lround(minutes.get<double>()));
         } catch (const json::exception&) {
-            // An older config or a non-K2 printer: no heat soak field.
+            // An older config or another printer: no one-time soak.
         }
-        done(status);
+        done(result);
     });
     http.perform();
 }
@@ -406,7 +500,7 @@ bool parse_box_print_mapping(const std::string& serialized, BoxPrintMapping& map
 
 bool start_box_print(const Moonraker& host, const std::string& filename, const std::string& serialized_mapping,
                      std::string& error, const std::function<bool()>& cancelled,
-                     const std::function<bool()>& starting, std::optional<int> soak_minutes)
+                     const std::function<bool()>& starting, const PrintStartChoices& choices)
 {
     error.clear();
     auto is_cancelled = [&] {
@@ -445,7 +539,7 @@ bool start_box_print(const Moonraker& host, const std::string& filename, const s
             error = "This printer no longer supports the selected Box print mapping.";
             return false;
         }
-        return !start_cancelled() && ordinary_start(host, filename, quoted_filename, soak_minutes, error);
+        return !start_cancelled() && ordinary_start(host, filename, quoted_filename, choices, error);
     }
     if (!script(host, "BOX_PRINT_INFO FILENAME=" + quoted_filename, error) || is_cancelled())
         return false;
@@ -460,7 +554,7 @@ bool start_box_print(const Moonraker& host, const std::string& filename, const s
         if (!tools.is_array())
             throw std::runtime_error("Invalid Box file tools.");
         if (tools.empty() && !selected)
-            return !start_cancelled() && ordinary_start(host, filename, quoted_filename, soak_minutes, error);
+            return !start_cancelled() && ordinary_start(host, filename, quoted_filename, choices, error);
         std::set<int> used;
         for (const auto& tool : tools) {
             if (!valid_index(tool.at("tool"), 255) || !used.insert(tool.at("tool").get<int>()).second)
@@ -477,7 +571,7 @@ bool start_box_print(const Moonraker& host, const std::string& filename, const s
         }
         if (start_cancelled())
             return false;
-        return script(host, "BOX_PRINT_START FILENAME=" + quoted_filename + " MAP=\"" + map + "\"" + soak_line(soak_minutes),
+        return script(host, start_script("BOX_PRINT_START FILENAME=" + quoted_filename + " MAP=\"" + map + "\"", choices),
                       error);
     } catch (const std::exception& ex) {
         error = std::string("Cannot start Box print: ") + ex.what();
